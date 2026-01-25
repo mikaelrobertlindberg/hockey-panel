@@ -1,0 +1,25 @@
+# Temporary files
+.tmp/
+
+# Dependencies
+node_modules/
+
+# Build artifacts
+firmware/.pio/
+backend/dist/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Credentials (if any)
+credentials.json
+token.json
