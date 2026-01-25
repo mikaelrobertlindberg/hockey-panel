@@ -1,0 +1,17 @@
+[Unit]
+Description=Hockey Panel Backend - SHL/Allsvenskan Data Proxy
+After=network.target
+
+[Service]
+Type=simple
+User=devpi
+WorkingDirectory=/home/devpi/clawd/hockey-panel/backend
+ExecStart=/usr/bin/node dist/server.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
