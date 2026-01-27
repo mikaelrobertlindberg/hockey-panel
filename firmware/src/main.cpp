@@ -1,6 +1,6 @@
 /**
- * Hockey Panel - ESP32-2432S028 "Cheap Yellow Display"
- * v1.10.0 - Fixed calibration persistence + WiFi reconnect + Watchdog
+ * Hockey Panel - ESP32-2432S028 "Cheap Yellow Display" 
+ * v1.10.4 - Re-enabled auto calibration for fresh installs
  */
 
 #include <Arduino.h>
@@ -12,7 +12,7 @@
 #include <esp_task_wdt.h>
 #include "display_config.hpp"
 
-#define FIRMWARE_VERSION "1.10.0"
+#define FIRMWARE_VERSION "1.10.4"
 
 // WiFi
 const char* WIFI_SSID = "IoT";
@@ -214,6 +214,11 @@ void connectWiFi() {
     
     Serial.print("WiFi connecting");
     WiFi.mode(WIFI_STA);
+    
+    // WiFi power optimizations for better range
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);  // Max power (19.5 dBm)
+    WiFi.setSleep(false);                 // Disable power save mode
+    
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     
     int attempts = 0;
@@ -225,9 +230,20 @@ void connectWiFi() {
     }
     
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf(" Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+        long rssi = WiFi.RSSI();
+        String signalQuality;
+        if (rssi > -50) signalQuality = "Excellent";
+        else if (rssi > -60) signalQuality = "Very Good"; 
+        else if (rssi > -70) signalQuality = "Good";
+        else if (rssi > -80) signalQuality = "Fair";
+        else signalQuality = "Weak";
+        
+        Serial.printf(" Connected!\n");
+        Serial.printf("  IP: %s\n", WiFi.localIP().toString().c_str());
+        Serial.printf("  RSSI: %d dBm (%s)\n", rssi, signalQuality.c_str());
+        Serial.printf("  TX Power: 19.5 dBm (Max)\n");
     } else {
-        Serial.println(" FAILED");
+        Serial.println(" FAILED - Check signal strength or move closer to router");
     }
 }
 
@@ -240,6 +256,15 @@ void checkWiFiConnection() {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("WiFi lost, reconnecting...");
         connectWiFi();
+    } else {
+        // Log signal strength every 2 minutes for diagnostics
+        static unsigned long lastRSSILog = 0;
+        if (millis() - lastRSSILog > 120000) {  // 2 minutes
+            long rssi = WiFi.RSSI();
+            Serial.printf("WiFi Status: Connected | RSSI: %d dBm | IP: %s\n", 
+                         rssi, WiFi.localIP().toString().c_str());
+            lastRSSILog = millis();
+        }
     }
 }
 
@@ -299,13 +324,21 @@ void fetchData() {
     
     if (WiFi.status() != WL_CONNECTED) {
         connectionOK = false;
+        Serial.println("fetchData: WiFi not connected");
         return;
+    }
+    
+    // Log WiFi signal strength before each fetch
+    long rssi = WiFi.RSSI();
+    if (rssi < -80) {
+        Serial.printf("Warning: Weak WiFi signal (%d dBm) - may affect data fetch\n", rssi);
     }
     
     HTTPClient http;
     http.begin(API_URL);
     http.setTimeout(8000);  // Shorter timeout
     
+    Serial.printf("Fetching data... (RSSI: %d dBm)\n", rssi);
     int code = http.GET();
     
     if (code == 200) {
@@ -346,10 +379,16 @@ void fetchData() {
             connectionOK = true;
             lastSuccessfulFetch = millis();
             dataLoaded = true;
-            Serial.printf("Data OK: SHL %d, HA %d, News %d\n", shlTeamCount, haTeamCount, newsCount);
+            long rssi = WiFi.RSSI();
+            Serial.printf("Data OK: SHL %d, HA %d, News %d | RSSI: %d dBm\n", 
+                         shlTeamCount, haTeamCount, newsCount, rssi);
         }
     } else {
-        Serial.printf("HTTP error: %d\n", code);
+        long rssi = WiFi.RSSI();
+        Serial.printf("HTTP error: %d | RSSI: %d dBm\n", code, rssi);
+        if (rssi < -85) {
+            Serial.println("HTTP error likely due to weak WiFi signal!");
+        }
         connectionOK = false;
     }
     http.end();
@@ -1244,22 +1283,19 @@ void setup() {
     display.setCursor(60, 130);
     display.print("SHL + Allsvenskan");
     
-    // Only force calibration if NVS is completely empty/corrupt
+    // Auto-calibrate if defaults are being used (likely after flash)
+    Serial.printf("Touch calibration: %s [%d-%d, %d-%d]\n", 
+                 touchCal.valid ? "Valid" : "Using defaults",
+                 touchCal.xMin, touchCal.xMax, touchCal.yMin, touchCal.yMax);
+    
     if (!touchCal.valid && touchCal.xMin == 300 && touchCal.xMax == 3800) {
+        Serial.println("Default calibration detected - starting auto calibration");
         display.setTextColor(COLOR_ACCENT);
-        display.setCursor(20, 160);
-        display.print("Forsta start - kalibrering");
-        display.setCursor(60, 180);
-        display.print("kravs...");
+        display.setCursor(30, 160);
+        display.print("Touch kalibrering startar...");
         delay(2000);
         currentScreen = SCREEN_CALIBRATE;
         calibrationStep = 0;
-    } else {
-        // Try to use existing calibration even if marked invalid
-        if (!touchCal.valid) {
-            Serial.println("Using stored values despite invalid flag");
-            touchCal.valid = true;  // Trust stored values
-        }
     }
     
     connectWiFi();
@@ -1306,6 +1342,34 @@ void loop() {
     esp_task_wdt_reset();  // Feed watchdog every loop
     
     ArduinoOTA.handle();
+    
+    // Check for serial calibration command
+    if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        if (cmd == "calibrate" || cmd == "cal") {
+            Serial.println("Starting calibration via serial command...");
+            currentScreen = SCREEN_CALIBRATE;
+            calibrationStep = 0;
+            drawScreen();
+            return;
+        } else if (cmd == "status") {
+            long rssi = WiFi.RSSI();
+            Serial.printf("System Status:\n");
+            Serial.printf("  Firmware: v%s\n", FIRMWARE_VERSION);
+            Serial.printf("  WiFi: %s (RSSI: %d dBm)\n", WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected", rssi);
+            Serial.printf("  IP: %s\n", WiFi.localIP().toString().c_str());
+            Serial.printf("  Touch: %s [%d-%d, %d-%d]\n", touchCal.valid ? "Valid" : "Invalid",
+                         touchCal.xMin, touchCal.xMax, touchCal.yMin, touchCal.yMax);
+            Serial.printf("  Data loaded: %s\n", dataLoaded ? "Yes" : "No");
+        } else if (cmd == "help") {
+            Serial.println("Available commands:");
+            Serial.println("  calibrate - Start touch calibration");
+            Serial.println("  status    - Show system status");
+            Serial.println("  help      - Show this help");
+        }
+    }
+    
     handleTouch();
     checkWiFiConnection();  // Auto-reconnect WiFi
     
