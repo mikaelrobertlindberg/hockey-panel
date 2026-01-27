@@ -79,4 +79,8 @@ Change API_URL if backend IP changes.
 ## Learnings Log
 
 - 2026-01-25: v1.9.0 - Touch calibration added, 4-tab layout
-- Touch calibration values vary per unit, must be stored in NVS
+- 2026-01-27: v1.10.0 - Fixed calibration persistence + WiFi reconnect + watchdog
+- **Touch calibration**: Values vary per unit, validation was too strict (min 500px range)
+- **NVS conflicts**: Use unique namespace ("hockey-touch" vs "touch") to avoid conflicts
+- **WiFi stability**: ESP32 doesn't auto-reconnect, need explicit checkWiFiConnection()
+- **Hanging issues**: Always enable watchdog timer, 30s timeout is good balance

@@ -1,6 +1,6 @@
 /**
  * Hockey Panel - ESP32-2432S028 "Cheap Yellow Display"
- * v1.6.0 - Touch calibration + Settings menu
+ * v1.10.0 - Fixed calibration persistence + WiFi reconnect + Watchdog
  */
 
 #include <Arduino.h>
@@ -9,9 +9,10 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <esp_task_wdt.h>
 #include "display_config.hpp"
 
-#define FIRMWARE_VERSION "1.9.0"
+#define FIRMWARE_VERSION "1.10.0"
 
 // WiFi
 const char* WIFI_SSID = "IoT";
@@ -37,7 +38,7 @@ Screen previousScreen = SCREEN_SHL;
 // Preferences for storing calibration
 Preferences prefs;
 
-// Touch calibration data
+// Touch calibration data - RELAXED validation
 struct TouchCalibration {
     int16_t xMin, xMax, yMin, yMax;
     bool valid;
@@ -100,7 +101,9 @@ bool liveMatch = false;
 
 // Connection
 unsigned long lastSuccessfulFetch = 0;
+unsigned long lastWiFiCheck = 0;
 const unsigned long CONNECTION_TIMEOUT = 180000;
+const unsigned long WIFI_CHECK_INTERVAL = 30000;  // Check WiFi every 30s
 bool connectionOK = false;
 
 // Scroll
@@ -127,9 +130,10 @@ bool dataLoaded = false;
 
 // Forward declarations
 void drawScreen();
+void checkWiFiConnection();
 
 void clearCalibration() {
-    prefs.begin("touch", false);
+    prefs.begin("hockey-touch", false);  // Use unique namespace
     prefs.clear();
     prefs.end();
     touchCal.valid = false;
@@ -137,7 +141,7 @@ void clearCalibration() {
 }
 
 void loadCalibration() {
-    prefs.begin("touch", true);
+    prefs.begin("hockey-touch", true);
     touchCal.xMin = prefs.getShort("xMin", 300);
     touchCal.xMax = prefs.getShort("xMax", 3800);
     touchCal.yMin = prefs.getShort("yMin", 300);
@@ -145,26 +149,28 @@ void loadCalibration() {
     touchCal.valid = prefs.getBool("valid", false);
     prefs.end();
     
-    // Validate calibration - if values are nonsense, invalidate
+    // RELAXED validation - only check for obvious corruption
     if (touchCal.xMax <= touchCal.xMin || touchCal.yMax <= touchCal.yMin ||
-        touchCal.xMax < 0 || touchCal.yMax < 0 ||
-        (touchCal.xMax - touchCal.xMin) < 500 || (touchCal.yMax - touchCal.yMin) < 500) {
-        Serial.println("Invalid calibration detected, clearing!");
-        clearCalibration();
+        touchCal.xMax < 0 || touchCal.yMax < 0 || touchCal.xMin < 0 || touchCal.yMin < 0 ||
+        touchCal.xMax > 5000 || touchCal.yMax > 5000 ||
+        (touchCal.xMax - touchCal.xMin) < 200 || (touchCal.yMax - touchCal.yMin) < 200) {
+        Serial.println("Corrupted calibration detected, using defaults");
         touchCal.xMin = 300;
         touchCal.xMax = 3800;
         touchCal.yMin = 300;
         touchCal.yMax = 3800;
         touchCal.valid = false;
+    } else if (touchCal.valid) {
+        Serial.println("Valid calibration loaded from NVS");
     }
     
     Serial.printf("Touch cal: %s [%d-%d, %d-%d]\n", 
-        touchCal.valid ? "OK" : "DEFAULT",
+        touchCal.valid ? "VALID" : "DEFAULT",
         touchCal.xMin, touchCal.xMax, touchCal.yMin, touchCal.yMax);
 }
 
 void saveCalibration() {
-    prefs.begin("touch", false);
+    prefs.begin("hockey-touch", false);
     prefs.putShort("xMin", touchCal.xMin);
     prefs.putShort("xMax", touchCal.xMax);
     prefs.putShort("yMin", touchCal.yMin);
@@ -172,7 +178,8 @@ void saveCalibration() {
     prefs.putBool("valid", true);
     prefs.end();
     touchCal.valid = true;
-    Serial.println("Touch calibration saved!");
+    Serial.printf("Touch calibration saved: [%d-%d, %d-%d]\n",
+        touchCal.xMin, touchCal.xMax, touchCal.yMin, touchCal.yMax);
 }
 
 // Get calibrated touch coordinates
@@ -201,18 +208,38 @@ bool getRawTouch(int16_t& rx, int16_t& ry) {
 }
 
 void connectWiFi() {
-    Serial.print("WiFi: ");
+    if (WiFi.status() == WL_CONNECTED) {
+        return;  // Already connected
+    }
+    
+    Serial.print("WiFi connecting");
+    WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
+    
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
         delay(500);
         Serial.print(".");
         attempts++;
+        esp_task_wdt_reset();  // Feed watchdog
     }
+    
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf(" OK (%s)\n", WiFi.localIP().toString().c_str());
+        Serial.printf(" Connected! IP: %s\n", WiFi.localIP().toString().c_str());
     } else {
         Serial.println(" FAILED");
+    }
+}
+
+void checkWiFiConnection() {
+    if (millis() - lastWiFiCheck < WIFI_CHECK_INTERVAL) {
+        return;
+    }
+    lastWiFiCheck = millis();
+    
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("WiFi lost, reconnecting...");
+        connectWiFi();
     }
 }
 
@@ -268,6 +295,8 @@ void parseNews(JsonArray arr, const char* league) {
 }
 
 void fetchData() {
+    esp_task_wdt_reset();  // Feed watchdog
+    
     if (WiFi.status() != WL_CONNECTED) {
         connectionOK = false;
         return;
@@ -275,7 +304,7 @@ void fetchData() {
     
     HTTPClient http;
     http.begin(API_URL);
-    http.setTimeout(10000);
+    http.setTimeout(8000);  // Shorter timeout
     
     int code = http.GET();
     
@@ -317,9 +346,10 @@ void fetchData() {
             connectionOK = true;
             lastSuccessfulFetch = millis();
             dataLoaded = true;
-            Serial.printf("Data: SHL %d, HA %d, News %d\n", shlTeamCount, haTeamCount, newsCount);
+            Serial.printf("Data OK: SHL %d, HA %d, News %d\n", shlTeamCount, haTeamCount, newsCount);
         }
     } else {
+        Serial.printf("HTTP error: %d\n", code);
         connectionOK = false;
     }
     http.end();
@@ -943,7 +973,7 @@ void finishCalibration() {
     
     saveCalibration();
     
-    Serial.printf("Calibration saved: x[%d-%d] y[%d-%d]\n", 
+    Serial.printf("Calibration complete: x[%d-%d] y[%d-%d]\n", 
         touchCal.xMin, touchCal.xMax, touchCal.yMin, touchCal.yMax);
     
     display.fillScreen(COLOR_BG);
@@ -951,8 +981,8 @@ void finishCalibration() {
     display.setTextColor(COLOR_GREEN);
     display.setCursor(80, 110);
     display.print("KALIBRERING KLAR!");
-    display.setCursor(60, 140);
-    display.print("Vanta...");
+    display.setCursor(90, 140);
+    display.print("SPARAD!");
     
     // Wait for touch release
     delay(500);
@@ -967,9 +997,6 @@ void finishCalibration() {
     currentScreen = SCREEN_SHL;
     touchActive = false;
     lastTouchTime = millis();
-    
-    // Fetch data now
-    fetchData();
     
     Serial.println("Calibration complete, going to SHL screen");
 }
@@ -1194,6 +1221,10 @@ void setup() {
     
     Serial.printf("\n🏒 Hockey Panel v%s\n", FIRMWARE_VERSION);
     
+    // Enable watchdog (30 second timeout)
+    esp_task_wdt_init(30, true);
+    esp_task_wdt_add(NULL);
+    
     // Load touch calibration
     loadCalibration();
     
@@ -1213,16 +1244,22 @@ void setup() {
     display.setCursor(60, 130);
     display.print("SHL + Allsvenskan");
     
-    // If not calibrated, go straight to calibration
-    if (!touchCal.valid) {
+    // Only force calibration if NVS is completely empty/corrupt
+    if (!touchCal.valid && touchCal.xMin == 300 && touchCal.xMax == 3800) {
         display.setTextColor(COLOR_ACCENT);
-        display.setCursor(30, 160);
-        display.print("Touch ej kalibrerad!");
-        display.setCursor(30, 180);
-        display.print("Startar kalibrering...");
+        display.setCursor(20, 160);
+        display.print("Forsta start - kalibrering");
+        display.setCursor(60, 180);
+        display.print("kravs...");
         delay(2000);
         currentScreen = SCREEN_CALIBRATE;
         calibrationStep = 0;
+    } else {
+        // Try to use existing calibration even if marked invalid
+        if (!touchCal.valid) {
+            Serial.println("Using stored values despite invalid flag");
+            touchCal.valid = true;  // Trust stored values
+        }
     }
     
     connectWiFi();
@@ -1239,6 +1276,7 @@ void setup() {
         display.fillRect(50, 140, 220, 20, COLOR_BG);
         display.fillRect(50, 140, pct * 2.2, 20, COLOR_ACCENT);
         display.drawRect(50, 140, 220, 20, COLOR_TEXT);
+        esp_task_wdt_reset();  // Feed watchdog during OTA
     });
     ArduinoOTA.onEnd([]() {
         display.setCursor(80, 180);
@@ -1265,8 +1303,11 @@ void setup() {
 }
 
 void loop() {
+    esp_task_wdt_reset();  // Feed watchdog every loop
+    
     ArduinoOTA.handle();
     handleTouch();
+    checkWiFiConnection();  // Auto-reconnect WiFi
     
     // Shorter retry on error, normal interval otherwise
     unsigned long interval;
