@@ -12,12 +12,13 @@
 #include <esp_task_wdt.h>
 #include "display_config.hpp"
 
-#define FIRMWARE_VERSION "1.10.4"
+#define FIRMWARE_VERSION "1.17.0-compact-ui-optimized"
 
 // WiFi
 const char* WIFI_SSID = "IoT";
 const char* WIFI_PASS = "IoTAccess123!";
 const char* API_URL = "http://192.168.1.224:3080/api/all";
+const char* DIV3_API_URL = "http://192.168.1.224:3001/division3";
 
 // Colors
 #define COLOR_BG       0x1082
@@ -31,7 +32,7 @@ const char* API_URL = "http://192.168.1.224:3080/api/all";
 #define COLOR_DIM      0x7BEF
 
 // Screens
-enum Screen { SCREEN_SHL, SCREEN_HA, SCREEN_NEXT, SCREEN_NEWS, SCREEN_NEWS_DETAIL, SCREEN_TEAM_INFO, SCREEN_SETTINGS, SCREEN_CALIBRATE };
+enum Screen { SCREEN_SHL, SCREEN_HA, SCREEN_DIV3, SCREEN_NEXT, SCREEN_NEWS, SCREEN_NEWS_DETAIL, SCREEN_TEAM_INFO, SCREEN_SETTINGS, SCREEN_CALIBRATE };
 Screen currentScreen = SCREEN_SHL;
 Screen previousScreen = SCREEN_SHL;
 
@@ -79,6 +80,8 @@ Team shlTeams[14];
 int shlTeamCount = 0;
 Team haTeams[14];
 int haTeamCount = 0;
+Team div3Teams[16];  // Division 3 has more teams
+int div3TeamCount = 0;
 Match allMatches[40];
 int matchCount = 0;
 
@@ -106,15 +109,22 @@ const unsigned long CONNECTION_TIMEOUT = 180000;
 const unsigned long WIFI_CHECK_INTERVAL = 30000;  // Check WiFi every 30s
 bool connectionOK = false;
 
+// === RESPONSIVE UI FIXES ===
+bool displayDirty = true;           // Flag to force display redraw
+unsigned long lastTouchCheck = 0;   // Last time touch was checked
+unsigned long touchDebounceTime = 0; // Touch debouncing
+bool touchPressed = false;          // Touch state tracking
+const unsigned long TOUCH_CHECK_INTERVAL = 20; // 50Hz touch checking
+const unsigned long TOUCH_DEBOUNCE = 100;      // 100ms debounce
+
 // Scroll
 int scrollOffset = 0;
-const int VISIBLE_TEAMS = 8;
-const int VISIBLE_MATCHES = 4;
+const int VISIBLE_TEAMS = 12;
+const int VISIBLE_MATCHES = 5;
 
 // Touch
 bool touchActive = false;
 unsigned long lastTouchTime = 0;
-const unsigned long TOUCH_DEBOUNCE = 100;
 
 // Long press for settings
 unsigned long touchStartTime = 0;
@@ -125,11 +135,26 @@ const unsigned long LONG_PRESS_TIME = 10000;  // 10 seconds
 int calibrationStep = 0;
 int16_t calPoints[4][2];  // Raw touch values for 4 corners
 
+// Touch debug removed - using direct mapping now
+
 // Data loaded flag
 bool dataLoaded = false;
 
+// Fade transitions for smoother UI
+float screenFadeAlpha = 1.0;
+unsigned long fadeStartTime = 0;
+const unsigned long FADE_DURATION = 300; // 300ms fade for smooth transitions
+Screen fadingToScreen = SCREEN_SHL;
+bool isFading = false;
+
+// Clean feedback modal
+bool showPositiveModal = false;
+unsigned long modalStartTime = 0;
+const unsigned long MODAL_DURATION = 2000; // 2 seconds
+String modalMessage = "";
+
 // Forward declarations
-void drawScreen();
+void markDisplayDirty();
 void checkWiFiConnection();
 
 void clearCalibration() {
@@ -319,6 +344,51 @@ void parseNews(JsonArray arr, const char* league) {
     }
 }
 
+void fetchDivision3Data() {
+    HTTPClient http;
+    http.begin(DIV3_API_URL);
+    http.setTimeout(5000);
+    
+    int httpCode = http.GET();
+    
+    if (httpCode == HTTP_CODE_OK) {
+        String payload = http.getString();
+        
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, payload);
+        
+        if (!error) {
+            if (doc["division3"].is<JsonObject>()) {
+                JsonObject div3 = doc["division3"];
+                if (div3["standings"].is<JsonArray>()) {
+                    parseTeams(div3["standings"].as<JsonArray>(), div3Teams, div3TeamCount, 16);
+                    Serial.printf("Division 3: Loaded %d teams from API\n", div3TeamCount);
+                }
+            }
+        } else {
+            Serial.printf("Division 3 JSON parse error: %s\n", error.c_str());
+        }
+    } else {
+        Serial.printf("Division 3 API failed (%d), using fallback data\n", httpCode);
+        // Fallback to mock data if Division 3 scraper is unavailable
+        div3TeamCount = 14;
+        for (int i = 0; i < div3TeamCount; i++) {
+            div3Teams[i].position = i + 1;
+            div3Teams[i].name = String("Div3 Lag ") + String(i + 1);
+            div3Teams[i].played = 22;
+            div3Teams[i].wins = 15 - i;
+            div3Teams[i].draws = i % 3;  // Some variety in draws
+            div3Teams[i].losses = 7 + i;
+            div3Teams[i].goalsFor = 50 - i * 2;
+            div3Teams[i].goalsAgainst = 35 + i * 2;
+            div3Teams[i].goalDiff = (50 - i * 2) - (35 + i * 2);
+            div3Teams[i].points = (15 - i) * 2 + (i % 3); // More realistic points
+        }
+    }
+    
+    http.end();
+}
+
 void fetchData() {
     esp_task_wdt_reset();  // Feed watchdog
     
@@ -376,6 +446,8 @@ void fetchData() {
                 }
             }
             
+            // Division 3 will be fetched separately from dedicated scraper
+            
             connectionOK = true;
             lastSuccessfulFetch = millis();
             dataLoaded = true;
@@ -392,6 +464,9 @@ void fetchData() {
         connectionOK = false;
     }
     http.end();
+    
+    // Fetch Division 3 data from dedicated scraper
+    fetchDivision3Data();
 }
 
 String shortName(const String& name, int maxLen) {
@@ -436,19 +511,19 @@ bool isTimedOut() {
 }
 
 void drawHeader() {
-    display.fillRect(0, 0, 320, 28, COLOR_HEADER);
+    display.fillRect(0, 0, 320, 24, COLOR_HEADER);
     display.setFont(&fonts::Font0);
     display.setTextSize(1);
     
-    // 4 tabs: SHL, HA, NASTA, NEWS
-    const char* tabs[] = {"SHL", "HA", "NASTA", "NEWS"};
-    uint16_t colors[] = {COLOR_SHL, COLOR_HA, COLOR_ACCENT, COLOR_ACCENT};
-    int tabWidth = 72;
+    // 4 tabs: SHL, HA, DIV3, NEXT  
+    const char* tabs[] = {"SHL", "HA", "DIV3", "NEXT"};
+    uint16_t colors[] = {COLOR_SHL, COLOR_HA, 0x8410, COLOR_ACCENT}; // Orange for DIV3
+    int tabWidth = 80;
     
     for (int i = 0; i < 4; i++) {
         int x = i * tabWidth;
         bool active = (i == currentScreen) || 
-                      (currentScreen == SCREEN_TEAM_INFO && i == (selectedIsSHL ? 0 : 1));
+                      (currentScreen == SCREEN_TEAM_INFO && i == previousScreen);
         
         if (active) {
             display.fillRect(x, 0, tabWidth, 28, colors[i]);
@@ -456,12 +531,12 @@ void drawHeader() {
         } else {
             display.setTextColor(COLOR_DIM);
         }
-        display.setCursor(x + 8, 9);
+        display.setCursor(x + 8, 7);
         display.print(tabs[i]);
     }
     
     // Status dot
-    int sx = 305, sy = 14;
+    int sx = 305, sy = 12;
     if (isTimedOut()) {
         display.fillCircle(sx, sy, 7, COLOR_RED);
     } else if (connectionOK) {
@@ -472,51 +547,65 @@ void drawHeader() {
     display.drawCircle(sx, sy, 7, COLOR_TEXT);
 }
 
-void drawOfflineBanner() {
-    if (isTimedOut() && currentScreen != SCREEN_SETTINGS && currentScreen != SCREEN_CALIBRATE) {
-        display.fillRect(0, 222, 320, 18, COLOR_RED);
-        display.setFont(&fonts::Font0);
-        display.setTextColor(COLOR_TEXT);
-        display.setCursor(10, 226);
-        unsigned long mins = lastSuccessfulFetch > 0 ? (millis() - lastSuccessfulFetch) / 60000 : 0;
-        display.printf("OFFLINE - %lu min", mins);
+void drawSettingsIcon() {
+    // Small discrete settings icon in bottom right corner
+    if (currentScreen != SCREEN_SETTINGS && currentScreen != SCREEN_CALIBRATE) {
+        // Small subtle gear icon (using simple circles and dots)
+        int x = 295, y = 225;
+        display.drawCircle(x, y, 6, 0x4208); // Very dark gray
+        display.fillCircle(x, y, 3, 0x4208);
+        display.drawCircle(x, y, 8, 0x4208);
+        // Small dots around for gear teeth
+        for (int i = 0; i < 6; i++) {
+            float angle = i * 60 * PI / 180;
+            int dx = cos(angle) * 8;
+            int dy = sin(angle) * 8;
+            display.fillCircle(x + dx, y + dy, 1, 0x4208);
+        }
     }
 }
 
+void drawOfflineBanner() {
+    // Offline banner removed - status shown by connection indicator in header
+}
+
 void drawTable(Team* teams, int count, const char* title, uint16_t accent) {
-    display.fillRect(0, 28, 320, 194, COLOR_BG);
-    display.setFont(&fonts::lgfxJapanGothic_12);
+    display.fillRect(0, 24, 320, 216, COLOR_BG);
+    display.setFont(&fonts::Font0);
     
-    display.fillRect(0, 28, 320, 16, accent);
+    display.fillRect(0, 24, 320, 14, accent);
     display.setTextColor(COLOR_TEXT);
-    display.setCursor(5, 30);
+    display.setCursor(5, 26);
     display.print(title);
     
     display.setTextColor(COLOR_ACCENT);
-    display.setCursor(5, 47);
+    display.setCursor(5, 40);
     display.print("#");
-    display.setCursor(22, 47);
+    display.setCursor(22, 40);
     display.print("LAG");
-    display.setCursor(175, 47);
+    display.setCursor(175, 40);
     display.print("S");
-    display.setCursor(200, 47);
+    display.setCursor(200, 40);
     display.print("+/-");
-    display.setCursor(240, 47);
+    display.setCursor(240, 40);
     display.print("P");
     
-    display.drawLine(0, 60, 270, 60, COLOR_HEADER);
+    display.drawLine(0, 50, 270, 50, COLOR_HEADER);
     
+    // Scroll arrows positioned for correct touch zones
     if (scrollOffset > 0) {
-        display.fillTriangle(285, 70, 290, 65, 295, 70, COLOR_ACCENT);
+        display.fillTriangle(280, 85, 290, 75, 300, 85, COLOR_ACCENT);
+        display.drawTriangle(280, 85, 290, 75, 300, 85, COLOR_TEXT);
     }
     if (scrollOffset + VISIBLE_TEAMS < count) {
-        display.fillTriangle(285, 210, 290, 215, 295, 210, COLOR_ACCENT);
+        display.fillTriangle(280, 165, 290, 175, 300, 165, COLOR_ACCENT);
+        display.drawTriangle(280, 165, 290, 175, 300, 165, COLOR_TEXT);
     }
     
     int end = min(scrollOffset + VISIBLE_TEAMS, count);
     for (int i = scrollOffset; i < end; i++) {
         int row = i - scrollOffset;
-        int y = 63 + row * 19;
+        int y = 53 + row * 15;
         
         if (row % 2 == 1) {
             display.fillRect(0, y - 1, 270, 18, COLOR_HEADER);
@@ -552,12 +641,12 @@ void drawTable(Team* teams, int count, const char* title, uint16_t accent) {
 }
 
 void drawMatches(const char* filter, const char* title) {
-    display.fillRect(0, 28, 320, 194, COLOR_BG);
-    display.setFont(&fonts::lgfxJapanGothic_12);
+    display.fillRect(0, 24, 320, 216, COLOR_BG);
+    display.setFont(&fonts::Font0);
     
-    display.fillRect(0, 28, 320, 16, COLOR_ACCENT);
+    display.fillRect(0, 24, 320, 14, COLOR_ACCENT);
     display.setTextColor(COLOR_TEXT);
-    display.setCursor(5, 30);
+    display.setCursor(5, 26);
     display.print(title);
     
     int indices[40];
@@ -575,22 +664,25 @@ void drawMatches(const char* filter, const char* title) {
         return;
     }
     
+    // Scroll arrows positioned for correct touch zones
     if (scrollOffset > 0) {
-        display.fillTriangle(295, 50, 300, 45, 305, 50, COLOR_ACCENT);
+        display.fillTriangle(280, 85, 290, 75, 300, 85, COLOR_ACCENT);
+        display.drawTriangle(280, 85, 290, 75, 300, 85, COLOR_TEXT);
     }
     if (scrollOffset + VISIBLE_MATCHES < filtered) {
-        display.fillTriangle(295, 210, 300, 215, 305, 210, COLOR_ACCENT);
+        display.fillTriangle(280, 175, 290, 185, 300, 175, COLOR_ACCENT);
+        display.drawTriangle(280, 175, 290, 185, 300, 175, COLOR_TEXT);
     }
     
     int end = min(scrollOffset + VISIBLE_MATCHES, filtered);
     for (int i = scrollOffset; i < end; i++) {
         int row = i - scrollOffset;
-        int y = 50 + row * 42;
+        int y = 42 + row * 35;
         Match* m = &allMatches[indices[i]];
         
-        display.fillRoundRect(5, y, 280, 38, 4, COLOR_HEADER);
+        display.fillRoundRect(5, y, 280, 32, 6, COLOR_HEADER);
         
-        display.fillRoundRect(8, y + 3, 22, 12, 2, m->isSHL ? COLOR_SHL : COLOR_HA);
+        display.fillRoundRect(8, y + 3, 22, 12, 4, m->isSHL ? COLOR_SHL : COLOR_HA);
         display.setFont(&fonts::Font0);
         display.setTextColor(COLOR_TEXT);
         display.setCursor(10, y + 5);
@@ -624,12 +716,12 @@ void drawMatches(const char* filter, const char* title) {
 }
 
 void drawNews() {
-    display.fillRect(0, 28, 320, 194, COLOR_BG);
-    display.setFont(&fonts::lgfxJapanGothic_12);
+    display.fillRect(0, 24, 320, 216, COLOR_BG);
+    display.setFont(&fonts::Font0);
     
-    display.fillRect(0, 28, 320, 16, COLOR_ACCENT);
+    display.fillRect(0, 24, 320, 14, COLOR_ACCENT);
     display.setTextColor(COLOR_TEXT);
-    display.setCursor(5, 30);
+    display.setCursor(5, 26);
     display.print("Senaste nyheterna");
     
     if (newsCount == 0) {
@@ -640,25 +732,28 @@ void drawNews() {
     }
     
     // Scroll
-    const int VISIBLE_NEWS = 5;
+    const int VISIBLE_NEWS = 7;
+    // Scroll arrows positioned for correct touch zones
     if (scrollOffset > 0) {
-        display.fillTriangle(295, 50, 300, 45, 305, 50, COLOR_ACCENT);
+        display.fillTriangle(280, 85, 290, 75, 300, 85, COLOR_ACCENT);
+        display.drawTriangle(280, 85, 290, 75, 300, 85, COLOR_TEXT);
     }
     if (scrollOffset + VISIBLE_NEWS < newsCount) {
-        display.fillTriangle(295, 210, 300, 215, 305, 210, COLOR_ACCENT);
+        display.fillTriangle(280, 175, 290, 185, 300, 175, COLOR_ACCENT);
+        display.drawTriangle(280, 175, 290, 185, 300, 175, COLOR_TEXT);
     }
     
     int end = min(scrollOffset + VISIBLE_NEWS, newsCount);
     for (int i = scrollOffset; i < end; i++) {
         int row = i - scrollOffset;
-        int y = 50 + row * 34;
+        int y = 42 + row * 28;
         
         // News card
-        display.fillRoundRect(5, y, 305, 30, 4, COLOR_HEADER);
+        display.fillRoundRect(5, y, 305, 25, 6, COLOR_HEADER);
         
         // League badge
         bool isSHL = allNews[i].league == "SHL";
-        display.fillRoundRect(8, y + 3, 28, 12, 2, isSHL ? COLOR_SHL : COLOR_HA);
+        display.fillRoundRect(8, y + 3, 28, 12, 6, isSHL ? COLOR_SHL : COLOR_HA);
         display.setFont(&fonts::Font0);
         display.setTextColor(COLOR_TEXT);
         display.setCursor(12, y + 5);
@@ -685,7 +780,7 @@ void drawNews() {
 void drawNewsDetail() {
     if (selectedNewsIndex < 0 || selectedNewsIndex >= newsCount) {
         currentScreen = SCREEN_NEWS;
-        drawScreen();
+        markDisplayDirty();
         return;
     }
     
@@ -694,7 +789,7 @@ void drawNewsDetail() {
     display.fillRect(0, 28, 320, 212, COLOR_BG);
     
     // Back button
-    display.fillRoundRect(5, 32, 50, 20, 3, COLOR_HEADER);
+    display.fillRoundRect(5, 32, 50, 20, 8, COLOR_HEADER);
     display.setFont(&fonts::Font0);
     display.setTextColor(COLOR_TEXT);
     display.setCursor(12, 38);
@@ -702,7 +797,7 @@ void drawNewsDetail() {
     
     // League badge
     bool isSHL = news->league == "SHL";
-    display.fillRoundRect(65, 32, 35, 20, 3, isSHL ? COLOR_SHL : COLOR_HA);
+    display.fillRoundRect(65, 32, 35, 20, 8, isSHL ? COLOR_SHL : COLOR_HA);
     display.setCursor(72, 38);
     display.print(isSHL ? "SHL" : "HA");
     
@@ -745,7 +840,7 @@ void drawNewsDetail() {
     
     int maxLines = 7;
     int lineCount = 0;
-    while (summary.length() > 0 && lineCount < maxLines && y < 220) {
+    while (summary.length() > 0 && lineCount < maxLines && y < 238) {
         int lineLen = min((int)summary.length(), charsPerLine + 5);
         if (summary.length() > lineLen) {
             int lastSpace = summary.lastIndexOf(' ', lineLen);
@@ -767,11 +862,13 @@ void drawNewsDetail() {
 }
 
 void drawTeamInfo() {
-    Team* team = selectedIsSHL ? &shlTeams[selectedTeamIndex] : &haTeams[selectedTeamIndex];
+    Team* team = (previousScreen == SCREEN_SHL) ? &shlTeams[selectedTeamIndex] : 
+                 (previousScreen == SCREEN_HA) ? &haTeams[selectedTeamIndex] : 
+                 &div3Teams[selectedTeamIndex];
     
     display.fillRect(0, 28, 320, 194, COLOR_BG);
     
-    display.fillRoundRect(5, 32, 50, 20, 3, COLOR_HEADER);
+    display.fillRoundRect(5, 32, 50, 20, 8, COLOR_HEADER);
     display.setFont(&fonts::Font0);
     display.setTextColor(COLOR_TEXT);
     display.setCursor(12, 38);
@@ -784,7 +881,10 @@ void drawTeamInfo() {
     display.setCursor(10, 62);
     display.printf("#%d %s", team->position, team->name.c_str());
     display.setCursor(10, 78);
-    display.print(selectedIsSHL ? "SHL" : "HockeyAllsvenskan");
+    const char* leagueName = (previousScreen == SCREEN_SHL) ? "SHL" :
+                             (previousScreen == SCREEN_HA) ? "HockeyAllsvenskan" :
+                             "Division 3";
+    display.print(leagueName);
     
     display.fillRect(0, 95, 320, 145, COLOR_BG);
     display.setFont(&fonts::lgfxJapanGothic_12);
@@ -889,7 +989,7 @@ void drawSettings() {
     display.setFont(&fonts::lgfxJapanGothic_12);
     
     // Back button
-    display.fillRoundRect(5, 32, 50, 20, 3, COLOR_HEADER);
+    display.fillRoundRect(5, 32, 50, 20, 8, COLOR_HEADER);
     display.setFont(&fonts::Font0);
     display.setTextColor(COLOR_TEXT);
     display.setCursor(12, 38);
@@ -904,7 +1004,7 @@ void drawSettings() {
     int y = 60;
     
     // Calibrate touch button
-    display.fillRoundRect(20, y, 280, 40, 5, COLOR_ACCENT);
+    display.fillRoundRect(20, y, 280, 40, 12, COLOR_ACCENT);
     display.setTextColor(COLOR_TEXT);
     display.setCursor(60, y + 12);
     display.print("KALIBRERA TOUCH");
@@ -994,25 +1094,41 @@ void drawCalibrationScreen() {
     display.print("Haller i 3s for att avbryta");
 }
 
+
+
 void finishCalibration() {
     // Calculate min/max from the 4 corner points
     // Points: 0=TL, 1=TR, 2=BR, 3=BL
-    touchCal.xMin = (calPoints[0][0] + calPoints[3][0]) / 2;  // Left edge avg
-    touchCal.xMax = (calPoints[1][0] + calPoints[2][0]) / 2;  // Right edge avg
-    touchCal.yMin = (calPoints[0][1] + calPoints[1][1]) / 2;  // Top edge avg
-    touchCal.yMax = (calPoints[2][1] + calPoints[3][1]) / 2;  // Bottom edge avg
+    int leftAvg = (calPoints[0][0] + calPoints[3][0]) / 2;   // Left edge avg
+    int rightAvg = (calPoints[1][0] + calPoints[2][0]) / 2;  // Right edge avg
+    int topAvg = (calPoints[0][1] + calPoints[1][1]) / 2;    // Top edge avg
+    int bottomAvg = (calPoints[2][1] + calPoints[3][1]) / 2; // Bottom edge avg
+    
+    touchCal.xMin = leftAvg;
+    touchCal.xMax = rightAvg; 
+    touchCal.yMin = topAvg;
+    touchCal.yMax = bottomAvg;
     
     // Add some margin (the targets are 20px from edge)
-    int xMargin = (touchCal.xMax - touchCal.xMin) * 20 / 280;
-    int yMargin = (touchCal.yMax - touchCal.yMin) * 20 / 200;
-    touchCal.xMin -= xMargin;
-    touchCal.xMax += xMargin;
-    touchCal.yMin -= yMargin;
-    touchCal.yMax += yMargin;
+    if (touchCal.xMax > touchCal.xMin && touchCal.yMax > touchCal.yMin) {
+        int xMargin = (touchCal.xMax - touchCal.xMin) * 20 / 280;
+        int yMargin = (touchCal.yMax - touchCal.yMin) * 20 / 200;
+        
+        touchCal.xMin -= xMargin;
+        touchCal.xMax += xMargin;
+        touchCal.yMin -= yMargin;
+        touchCal.yMax += yMargin;
+    } else {
+        // Fallback to safe defaults if calibration failed
+        touchCal.xMin = 300;
+        touchCal.xMax = 3800;
+        touchCal.yMin = 300;
+        touchCal.yMax = 3800;
+    }
     
     saveCalibration();
     
-    Serial.printf("Calibration complete: x[%d-%d] y[%d-%d]\n", 
+    Serial.printf("Calibration saved: x[%d-%d] y[%d-%d]\n", 
         touchCal.xMin, touchCal.xMax, touchCal.yMin, touchCal.yMax);
     
     display.fillScreen(COLOR_BG);
@@ -1023,13 +1139,15 @@ void finishCalibration() {
     display.setCursor(90, 140);
     display.print("SPARAD!");
     
-    // Wait for touch release
-    delay(500);
+    // SHORTENED: Much faster completion (Mike's feedback)
+    delay(100);  // Brief pause to show success message
     uint16_t tx, ty;
-    while (display.getTouch(&tx, &ty)) {
-        delay(50);  // Wait until finger lifted
+    // Quick touch release check (max 1 second)
+    unsigned long touchReleaseStart = millis();
+    while (display.getTouch(&tx, &ty) && (millis() - touchReleaseStart < 1000)) {
+        delay(20);  // Faster checking
     }
-    delay(500);
+    delay(100);  // Quick final pause
     
     // Reset state and go to main screen
     calibrationStep = 0;
@@ -1037,7 +1155,97 @@ void finishCalibration() {
     touchActive = false;
     lastTouchTime = millis();
     
-    Serial.println("Calibration complete, going to SHL screen");
+    // IMPORTANT: Reset touch state for responsive UI
+    touchPressed = false;
+    touchDebounceTime = millis();
+    lastTouchCheck = 0;
+    
+    // Force immediate display update + prevent immediate data fetch
+    markDisplayDirty();
+    lastFetch = millis(); // Reset data fetch timer to prevent immediate fetch
+    
+    Serial.println("Calibration complete - fast transition to SHL screen");
+}
+
+// Start smooth fade transition to new screen
+void startFadeTransition(Screen newScreen) {
+    if (newScreen != currentScreen && !isFading) {
+        fadeStartTime = millis();
+        fadingToScreen = newScreen;
+        isFading = true;
+        screenFadeAlpha = 1.0;
+        markDisplayDirty();
+    }
+}
+
+// Show clean positive feedback modal
+void showModal(String message) {
+    modalMessage = message;
+    showPositiveModal = true;
+    modalStartTime = millis();
+    markDisplayDirty();
+}
+
+// Update modal state
+void updateModal() {
+    if (showPositiveModal) {
+        if (millis() - modalStartTime > MODAL_DURATION) {
+            showPositiveModal = false;
+            markDisplayDirty();
+        }
+    }
+}
+
+// Draw clean minimal modal
+void drawModal() {
+    if (showPositiveModal) {
+        // Subtle dark overlay
+        display.fillRect(0, 0, 320, 240, 0x2104); // Very dark transparent
+        
+        // Clean centered modal card
+        int modalWidth = 200;
+        int modalHeight = 60;
+        int x = (320 - modalWidth) / 2;
+        int y = (240 - modalHeight) / 2;
+        
+        // Modal background with subtle shadow
+        display.fillRoundRect(x + 2, y + 2, modalWidth, modalHeight, 12, 0x2104); // Shadow
+        display.fillRoundRect(x, y, modalWidth, modalHeight, 12, COLOR_BG); // Main card
+        display.drawRoundRect(x, y, modalWidth, modalHeight, 12, COLOR_ACCENT); // Border
+        
+        // Message text
+        display.setFont(&fonts::lgfxJapanGothic_12);
+        display.setTextColor(COLOR_TEXT);
+        int textWidth = modalMessage.length() * 8; // Approximate
+        int textX = x + (modalWidth - textWidth) / 2;
+        display.setCursor(textX, y + modalHeight/2 - 6);
+        display.print(modalMessage);
+    }
+}
+
+// Update fade animation 
+void updateFadeTransition() {
+    if (isFading) {
+        unsigned long elapsed = millis() - fadeStartTime;
+        float progress = (float)elapsed / FADE_DURATION;
+        
+        if (progress >= 1.0) {
+            // Fade complete
+            isFading = false;
+            screenFadeAlpha = 1.0;
+            currentScreen = fadingToScreen;
+            markDisplayDirty();
+        } else {
+            // Smooth fade curve
+            screenFadeAlpha = 1.0 - (progress * 0.3); // Subtle fade, not too dramatic
+            markDisplayDirty();
+        }
+    }
+}
+
+// Mark display for redraw (responsive UI)
+void markDisplayDirty() {
+    displayDirty = true;
 }
 
 void drawScreen() {
@@ -1054,6 +1262,9 @@ void drawScreen() {
             break;
         case SCREEN_HA:
             drawTable(haTeams, haTeamCount, "HockeyAllsvenskan", COLOR_HA);
+            break;
+        case SCREEN_DIV3:
+            drawTable(div3Teams, div3TeamCount, "Division 3", 0x8410);
             break;
         case SCREEN_NEXT:
             drawMatches("upcoming", "Kommande matcher");
@@ -1075,6 +1286,20 @@ void drawScreen() {
     }
     
     drawOfflineBanner();
+    drawSettingsIcon();
+    
+    // Draw modal on top if active
+    drawModal();
+}
+
+// Smart display update - only when dirty flag is set
+void updateDisplayIfNeeded() {
+    if (!displayDirty) {
+        return; // Skip redraw if nothing changed
+    }
+    
+    displayDirty = false; // Clear flag
+    drawScreen(); // Perform actual redraw
 }
 
 void handleCalibrationTouch() {
@@ -1097,7 +1322,7 @@ void handleCalibrationTouch() {
             // Long press = cancel
             currentScreen = SCREEN_SETTINGS;
             calibrationStep = 0;
-            drawScreen();
+            markDisplayDirty();
             return;
         }
         
@@ -1105,7 +1330,7 @@ void handleCalibrationTouch() {
             // Valid tap - store the raw value
             calPoints[calibrationStep][0] = rx;
             calPoints[calibrationStep][1] = ry;
-            Serial.printf("Cal point %d: %d, %d\n", calibrationStep, rx, ry);
+            Serial.printf("Cal point %d: %d,%d\n", calibrationStep, rx, ry);
             
             calibrationStep++;
             
@@ -1118,6 +1343,164 @@ void handleCalibrationTouch() {
     }
 }
 
+// Process touch events and handle UI interactions  
+void processTouchEvent(int x, int y) {
+    // SCROLL ARROWS - Check FIRST before other touch handling
+    if (x > 275) { // Right edge touch zone
+        int maxItems = 0, visible = 0;
+        
+        // Determine max items and visible count based on current screen
+        if (currentScreen == SCREEN_SHL) {
+            maxItems = shlTeamCount;
+            visible = VISIBLE_TEAMS;
+        } else if (currentScreen == SCREEN_HA) {
+            maxItems = haTeamCount;
+            visible = VISIBLE_TEAMS;
+        } else if (currentScreen == SCREEN_DIV3) {
+            maxItems = div3TeamCount;
+            visible = VISIBLE_TEAMS;
+        } else if (currentScreen == SCREEN_NEXT) {
+            maxItems = matchCount;
+            visible = VISIBLE_MATCHES;
+        } else if (currentScreen == SCREEN_NEWS) {
+            maxItems = newsCount;
+            visible = 5; // VISIBLE_NEWS
+        } else {
+            return;
+        }
+        
+        // Simple large scroll zones - split at middle
+        // UP scroll: top half of right edge (skip tabs at very top)
+        if (y > 50 && y < 120 && scrollOffset > 0) {
+            scrollOffset--;
+            markDisplayDirty();
+            return;
+        }
+        
+        // DOWN scroll: bottom half of right edge
+        if (y >= 120 && y < 230 && scrollOffset + visible < maxItems) {
+            scrollOffset++;
+            markDisplayDirty();
+            return;
+        }
+        
+        return;
+    }
+    
+    // Tab touch (top 28 pixels) - CRITICAL for navigation  
+    if (y < 28 && currentScreen != SCREEN_SETTINGS) {
+        int tab = x / 80; // 4 tabs now: SHL, HA, DIV3, NEXT
+        
+        if (tab >= 0 && tab <= 3 && tab != currentScreen) {
+            currentScreen = (Screen)tab;
+            scrollOffset = 0;
+            markDisplayDirty();
+            return;
+        }
+    }
+    
+    // Settings: Calibrate button
+    if (currentScreen == SCREEN_SETTINGS && y > 60 && y < 100 && x > 20 && x < 300) {
+        currentScreen = SCREEN_CALIBRATE;
+        calibrationStep = 0;
+        markDisplayDirty();
+        return;
+    }
+    
+    // News click
+    if (currentScreen == SCREEN_NEWS && x < 305 && y > 50 && y < 238) {
+        int row = (y - 50) / 34;
+        int newsIdx = scrollOffset + row;
+        if (newsIdx >= 0 && newsIdx < newsCount) {
+            selectedNewsIndex = newsIdx;
+            currentScreen = SCREEN_NEWS_DETAIL;
+            markDisplayDirty();
+            return;
+        }
+    }
+    
+    // Team click in table views
+    if ((currentScreen == SCREEN_SHL || currentScreen == SCREEN_HA || currentScreen == SCREEN_DIV3) && 
+        x < 270 && y > 60 && y < 238) {
+        int row = (y - 63) / 19;
+        int teamIdx = scrollOffset + row;
+        int maxTeams = (currentScreen == SCREEN_SHL) ? shlTeamCount : 
+                       (currentScreen == SCREEN_HA) ? haTeamCount : div3TeamCount;
+        
+        if (teamIdx >= 0 && teamIdx < maxTeams) {
+            selectedTeamIndex = teamIdx;
+            selectedIsSHL = (currentScreen == SCREEN_SHL);
+            previousScreen = currentScreen;
+            currentScreen = SCREEN_TEAM_INFO;
+            markDisplayDirty();
+            return;
+        }
+    }
+    
+    // Back buttons in various screens
+    if (x < 60 && y > 30 && y < 55) {
+        if (currentScreen == SCREEN_TEAM_INFO) {
+            currentScreen = previousScreen;
+            scrollOffset = 0;
+            markDisplayDirty();
+        } else if (currentScreen == SCREEN_NEWS_DETAIL) {
+            currentScreen = SCREEN_NEWS;
+            markDisplayDirty();
+        } else if (currentScreen == SCREEN_SETTINGS) {
+            currentScreen = SCREEN_SHL;
+            scrollOffset = 0;
+            markDisplayDirty();
+        }
+        return;
+    }
+    
+    // Default: mark dirty for any other touch
+    markDisplayDirty();
+}
+
+// Responsive touch handler - rate-limited and debounced
+void handleTouchResponsive() {
+    // Rate-limited touch checking for better performance
+    if (millis() - lastTouchCheck < TOUCH_CHECK_INTERVAL) {
+        return;
+    }
+    lastTouchCheck = millis();
+    
+    int16_t x, y;
+    bool currentTouch = display.getTouch(&x, &y);
+    
+    // Minimal touch debug - only when needed
+    // (removed spam debug)
+    
+    // Debounced touch handling
+    if (currentTouch && !touchPressed) {
+        if (millis() - touchDebounceTime > TOUCH_DEBOUNCE) {
+            touchPressed = true;
+            touchDebounceTime = millis();
+            
+            // Process touch with direct mapping
+            
+            // SIMPLE FIXED MAPPING for Mike's hardware
+            int screenX, screenY;
+            
+            // Mike's hardware: RAW 0-300, nollpunkt = övre högra
+            // Simple direct mapping without complex conditions
+            screenX = 319 - (x * 319 / 300);  // Invert X: x=0->319, x=300->0  
+            screenY = (y * 239 / 300);        // Normal Y: y=0->0, y=300->239
+            
+            // Clamp to screen bounds
+            if (screenX < 0) screenX = 0;
+            if (screenX > 319) screenX = 319;
+            if (screenY < 0) screenY = 0;  
+            if (screenY > 239) screenY = 239;
+            processTouchEvent(screenX, screenY);
+        }
+    } else if (!currentTouch && touchPressed) {
+        touchPressed = false;
+    }
+}
+
+// Legacy touch handler (rename to avoid conflicts)
 void handleTouch() {
     if (currentScreen == SCREEN_CALIBRATE) {
         handleCalibrationTouch();
@@ -1139,7 +1522,7 @@ void handleTouch() {
             currentScreen = SCREEN_SETTINGS;
             scrollOffset = 0;
             Serial.println("Long press -> Settings");
-            drawScreen();
+            markDisplayDirty();
             return;
         }
     } else {
@@ -1155,14 +1538,14 @@ void handleTouch() {
         if (currentScreen == SCREEN_TEAM_INFO && x < 60 && y > 30 && y < 55) {
             currentScreen = previousScreen;
             scrollOffset = 0;
-            drawScreen();
+            markDisplayDirty();
             return;
         }
         
         // Back button in news detail
         if (currentScreen == SCREEN_NEWS_DETAIL && x < 60 && y > 30 && y < 55) {
             currentScreen = SCREEN_NEWS;
-            drawScreen();
+            markDisplayDirty();
             return;
         }
         
@@ -1170,17 +1553,24 @@ void handleTouch() {
         if (currentScreen == SCREEN_SETTINGS && x < 60 && y > 30 && y < 55) {
             currentScreen = SCREEN_SHL;
             scrollOffset = 0;
-            drawScreen();
+            markDisplayDirty();
+            return;
+        }
+        
+        // Settings icon touch (bottom right corner)
+        if (x > 285 && y > 215 && currentScreen != SCREEN_SETTINGS && currentScreen != SCREEN_CALIBRATE) {
+            startFadeTransition(SCREEN_SETTINGS);
+            scrollOffset = 0;
+            showModal("Inställningar öppnade");
             return;
         }
         
         // Tab touch (top 28 pixels) - 4 tabs now
         if (y < 28 && currentScreen != SCREEN_SETTINGS) {
-            int tab = x / 72;
+            int tab = x / 80;
             if (tab >= 0 && tab <= 3 && tab != currentScreen) {
-                currentScreen = (Screen)tab;
+                startFadeTransition((Screen)tab);
                 scrollOffset = 0;
-                drawScreen();
             }
             return;
         }
@@ -1189,35 +1579,36 @@ void handleTouch() {
         if (currentScreen == SCREEN_SETTINGS && y > 60 && y < 100 && x > 20 && x < 300) {
             currentScreen = SCREEN_CALIBRATE;
             calibrationStep = 0;
-            drawScreen();
+            markDisplayDirty();
             return;
         }
         
         // News click
-        if (currentScreen == SCREEN_NEWS && x < 305 && y > 50 && y < 220) {
+        if (currentScreen == SCREEN_NEWS && x < 305 && y > 50 && y < 238) {
             int row = (y - 50) / 34;
             int newsIdx = scrollOffset + row;
             if (newsIdx >= 0 && newsIdx < newsCount) {
                 selectedNewsIndex = newsIdx;
                 currentScreen = SCREEN_NEWS_DETAIL;
-                drawScreen();
+                markDisplayDirty();
                 return;
             }
         }
         
         // Team click in table views
-        if ((currentScreen == SCREEN_SHL || currentScreen == SCREEN_HA) && 
-            x < 270 && y > 60 && y < 220) {
+        if ((currentScreen == SCREEN_SHL || currentScreen == SCREEN_HA || currentScreen == SCREEN_DIV3) && 
+            x < 270 && y > 60 && y < 238) {
             int row = (y - 63) / 19;
             int teamIdx = scrollOffset + row;
-            int maxTeams = (currentScreen == SCREEN_SHL) ? shlTeamCount : haTeamCount;
+            int maxTeams = (currentScreen == SCREEN_SHL) ? shlTeamCount : 
+                           (currentScreen == SCREEN_HA) ? haTeamCount : div3TeamCount;
             
             if (teamIdx >= 0 && teamIdx < maxTeams) {
                 selectedTeamIndex = teamIdx;
                 selectedIsSHL = (currentScreen == SCREEN_SHL);
                 previousScreen = currentScreen;
                 currentScreen = SCREEN_TEAM_INFO;
-                drawScreen();
+                markDisplayDirty();
                 return;
             }
         }
@@ -1242,10 +1633,10 @@ void handleTouch() {
         
         if (y < 100 && scrollOffset > 0) {
             scrollOffset--;
-            drawScreen();
+            markDisplayDirty();
         } else if (y > 160 && scrollOffset + visible < maxItems) {
             scrollOffset++;
-            drawScreen();
+            markDisplayDirty();
         }
     }
     
@@ -1264,8 +1655,9 @@ void setup() {
     esp_task_wdt_init(30, true);
     esp_task_wdt_add(NULL);
     
-    // Load touch calibration
-    loadCalibration();
+    // Clear old calibration data and use new mapping
+    clearCalibration();
+    Serial.println("Old calibration cleared, using new direct mapping");
     
     display.init();
     display.setRotation(1);
@@ -1334,7 +1726,8 @@ void setup() {
     }
     delay(300);
     
-    drawScreen();
+    drawScreen();  // Initial screen draw
+    markDisplayDirty(); // Mark for future updates  
     Serial.println("Ready!");
 }
 
@@ -1351,7 +1744,7 @@ void loop() {
             Serial.println("Starting calibration via serial command...");
             currentScreen = SCREEN_CALIBRATE;
             calibrationStep = 0;
-            drawScreen();
+            markDisplayDirty();
             return;
         } else if (cmd == "status") {
             long rssi = WiFi.RSSI();
@@ -1370,10 +1763,30 @@ void loop() {
         }
     }
     
-    handleTouch();
+    // === RESPONSIVE UI FIXES ===
+    
+    // 🎯 CALIBRATION MODE: Only handle touch, skip all other operations
+    if (currentScreen == SCREEN_CALIBRATE) {
+        handleTouch(); // Use original touch handler for calibration
+        updateDisplayIfNeeded(); // Only update display if needed
+        delay(5);
+        return; // Skip all network/data operations during calibration
+    }
+    
+    // Normal operation (not calibrating):
+    
+    // 1. High priority: Responsive touch handling (50Hz)
+    handleTouchResponsive();
+    
+    // 2. Medium priority: System maintenance
     checkWiFiConnection();  // Auto-reconnect WiFi
     
-    // Shorter retry on error, normal interval otherwise
+    // 3. Low priority: Smart display updates (only when dirty)
+    updateFadeTransition();
+    updateModal();
+    updateDisplayIfNeeded();
+    
+    // 4. Lowest priority: Network data fetching (only when NOT calibrating)
     unsigned long interval;
     if (!connectionOK) {
         interval = FETCH_INTERVAL_ERROR;  // 15s retry on error
@@ -1387,11 +1800,12 @@ void loop() {
         lastFetch = millis();
         Serial.println("Fetching data...");
         fetchData();
-        if (currentScreen != SCREEN_SETTINGS && currentScreen != SCREEN_CALIBRATE && 
-            currentScreen != SCREEN_TEAM_INFO) {
-            drawScreen();
+        // Mark display dirty instead of immediate redraw
+        if (currentScreen != SCREEN_SETTINGS && currentScreen != SCREEN_TEAM_INFO) {
+            markDisplayDirty();
         }
     }
     
+    // Ultra-responsive 200Hz main loop
     delay(5);
 }

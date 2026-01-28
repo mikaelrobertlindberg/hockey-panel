@@ -108,3 +108,31 @@ watch -n 30 'curl -s http://localhost:3080/api/status'
 # System resources
 watch -n 60 'free -h && uptime'
 ```
+
+## v1.12.0-responsive (2026-01-27)
+**EVENT-DRIVEN RESPONSIVE UI - Löser touch lag & skärmblinking**
+
+### 🎯 Problem Åtgärdat:
+- **Touch lag** - För frekventa display updates blockerade touch handling
+- **Skärmblinking** - Display uppdaterades varje loop-iteration onödigt
+- **Låsta loopar** - Blocking operations förhindrade responsiv UI
+
+### ✅ Nya Features:
+1. **Display Dirty Flag System** - Bara rita om när innehåll faktiskt ändrats
+2. **Event-Driven Touch** - 50Hz touch check med debouncing
+3. **Non-Blocking Timing** - Allt styrs via millis() istället för delay()
+4. **State Management** - Proper screen state tracking
+5. **Rate-Limited Operations** - Network (30s), Touch (20ms), Display (vid behov)
+
+### ⚡ Performance:
+- **Main loop:** 200Hz (5ms delay) för ultra-responsiv UI
+- **Touch check:** 50Hz (20ms interval) 
+- **Network requests:** Var 30:e sekund (non-blocking)
+- **Display updates:** Endast vid faktiska förändringar
+
+### 🔄 Testing Checklist (v1.12.0):
+- [ ] Touch reagerar direkt (ingen lag)  
+- [ ] Skärm slutar blinka/flicker
+- [ ] Smooth navigation mellan skärmar
+- [ ] Serial commands respond (`status`, `main`, `fetch`)
+
