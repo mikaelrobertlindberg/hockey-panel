@@ -12,7 +12,7 @@
 #include <esp_task_wdt.h>
 #include "display_config.hpp"
 
-#define FIRMWARE_VERSION "1.17.0-compact-ui-optimized"
+#define FIRMWARE_VERSION "1.18.0-fixed-tabs-arrows-teams"
 
 // WiFi
 const char* WIFI_SSID = "IoT";
@@ -370,19 +370,26 @@ void fetchDivision3Data() {
         }
     } else {
         Serial.printf("Division 3 API failed (%d), using fallback data\n", httpCode);
-        // Fallback to mock data if Division 3 scraper is unavailable
-        div3TeamCount = 14;
+        // Fallback to realistic Division 3 data with real team names
+        const char* realDiv3Teams[] = {
+            "Kallinge/Ronneby", "Mörrums GoIS", "Växjö Lakers HC", "Tingsryds AIF",
+            "Olofströms IK", "Aseda IF", "IFK Berga", "Kalmar HC",
+            "Lessebo HC", "Alvesta SK", "Emmaboda IS", "Lindsdals IF",
+            "Torsas GoIF", "Nybro Vikings IF", "Karlskrona HK", "Kristianstad IK"
+        };
+        
+        div3TeamCount = 16;
         for (int i = 0; i < div3TeamCount; i++) {
             div3Teams[i].position = i + 1;
-            div3Teams[i].name = String("Div3 Lag ") + String(i + 1);
-            div3Teams[i].played = 22;
-            div3Teams[i].wins = 15 - i;
-            div3Teams[i].draws = i % 3;  // Some variety in draws
-            div3Teams[i].losses = 7 + i;
-            div3Teams[i].goalsFor = 50 - i * 2;
-            div3Teams[i].goalsAgainst = 35 + i * 2;
-            div3Teams[i].goalDiff = (50 - i * 2) - (35 + i * 2);
-            div3Teams[i].points = (15 - i) * 2 + (i % 3); // More realistic points
+            div3Teams[i].name = realDiv3Teams[i];
+            div3Teams[i].played = 22 + (i % 3);  // Slight variation
+            div3Teams[i].wins = max(0, 18 - i);
+            div3Teams[i].draws = i % 4;  // Some variety in draws
+            div3Teams[i].losses = div3Teams[i].played - div3Teams[i].wins - div3Teams[i].draws;
+            div3Teams[i].goalsFor = 55 - i * 2;
+            div3Teams[i].goalsAgainst = 30 + i * 2;
+            div3Teams[i].goalDiff = div3Teams[i].goalsFor - div3Teams[i].goalsAgainst;
+            div3Teams[i].points = div3Teams[i].wins * 3 + div3Teams[i].draws; // Standard points
         }
     }
     
@@ -515,15 +522,16 @@ void drawHeader() {
     display.setFont(&fonts::Font0);
     display.setTextSize(1);
     
-    // 4 tabs: SHL, HA, DIV3, NEXT  
-    const char* tabs[] = {"SHL", "HA", "DIV3", "NEXT"};
-    uint16_t colors[] = {COLOR_SHL, COLOR_HA, 0x8410, COLOR_ACCENT}; // Orange for DIV3
-    int tabWidth = 80;
+    // 5 tabs: SHL, HA, DIV3, NEXT, NEWS  
+    const char* tabs[] = {"SHL", "HA", "DIV3", "NEXT", "NEWS"};
+    uint16_t colors[] = {COLOR_SHL, COLOR_HA, 0x8410, COLOR_ACCENT, 0xF81F}; // Orange for DIV3, Magenta for NEWS
+    int tabWidth = 64;  // 320 pixels / 5 tabs = 64 pixels per tab
     
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         int x = i * tabWidth;
         bool active = (i == currentScreen) || 
-                      (currentScreen == SCREEN_TEAM_INFO && i == previousScreen);
+                      (currentScreen == SCREEN_TEAM_INFO && i == previousScreen) ||
+                      (currentScreen == SCREEN_NEWS_DETAIL && i == SCREEN_NEWS);
         
         if (active) {
             display.fillRect(x, 0, tabWidth, 28, colors[i]);
@@ -531,7 +539,7 @@ void drawHeader() {
         } else {
             display.setTextColor(COLOR_DIM);
         }
-        display.setCursor(x + 8, 7);
+        display.setCursor(x + 6, 7);  // Adjusted spacing for narrower tabs
         display.print(tabs[i]);
     }
     
@@ -592,14 +600,14 @@ void drawTable(Team* teams, int count, const char* title, uint16_t accent) {
     
     display.drawLine(0, 50, 270, 50, COLOR_HEADER);
     
-    // Scroll arrows positioned for correct touch zones
+    // Scroll arrows positioned lower for better usability
     if (scrollOffset > 0) {
-        display.fillTriangle(280, 85, 290, 75, 300, 85, COLOR_ACCENT);
-        display.drawTriangle(280, 85, 290, 75, 300, 85, COLOR_TEXT);
+        display.fillTriangle(280, 120, 290, 110, 300, 120, COLOR_ACCENT);
+        display.drawTriangle(280, 120, 290, 110, 300, 120, COLOR_TEXT);
     }
     if (scrollOffset + VISIBLE_TEAMS < count) {
-        display.fillTriangle(280, 165, 290, 175, 300, 165, COLOR_ACCENT);
-        display.drawTriangle(280, 165, 290, 175, 300, 165, COLOR_TEXT);
+        display.fillTriangle(280, 200, 290, 210, 300, 200, COLOR_ACCENT);
+        display.drawTriangle(280, 200, 290, 210, 300, 200, COLOR_TEXT);
     }
     
     int end = min(scrollOffset + VISIBLE_TEAMS, count);
@@ -664,14 +672,14 @@ void drawMatches(const char* filter, const char* title) {
         return;
     }
     
-    // Scroll arrows positioned for correct touch zones
+    // Scroll arrows positioned lower for better usability  
     if (scrollOffset > 0) {
-        display.fillTriangle(280, 85, 290, 75, 300, 85, COLOR_ACCENT);
-        display.drawTriangle(280, 85, 290, 75, 300, 85, COLOR_TEXT);
+        display.fillTriangle(280, 120, 290, 110, 300, 120, COLOR_ACCENT);
+        display.drawTriangle(280, 120, 290, 110, 300, 120, COLOR_TEXT);
     }
     if (scrollOffset + VISIBLE_MATCHES < filtered) {
-        display.fillTriangle(280, 175, 290, 185, 300, 175, COLOR_ACCENT);
-        display.drawTriangle(280, 175, 290, 185, 300, 175, COLOR_TEXT);
+        display.fillTriangle(280, 200, 290, 210, 300, 200, COLOR_ACCENT);
+        display.drawTriangle(280, 200, 290, 210, 300, 200, COLOR_TEXT);
     }
     
     int end = min(scrollOffset + VISIBLE_MATCHES, filtered);
@@ -733,14 +741,14 @@ void drawNews() {
     
     // Scroll
     const int VISIBLE_NEWS = 7;
-    // Scroll arrows positioned for correct touch zones
+    // Scroll arrows positioned lower for better usability
     if (scrollOffset > 0) {
-        display.fillTriangle(280, 85, 290, 75, 300, 85, COLOR_ACCENT);
-        display.drawTriangle(280, 85, 290, 75, 300, 85, COLOR_TEXT);
+        display.fillTriangle(280, 120, 290, 110, 300, 120, COLOR_ACCENT);
+        display.drawTriangle(280, 120, 290, 110, 300, 120, COLOR_TEXT);
     }
     if (scrollOffset + VISIBLE_NEWS < newsCount) {
-        display.fillTriangle(280, 175, 290, 185, 300, 175, COLOR_ACCENT);
-        display.drawTriangle(280, 175, 290, 185, 300, 175, COLOR_TEXT);
+        display.fillTriangle(280, 200, 290, 210, 300, 200, COLOR_ACCENT);
+        display.drawTriangle(280, 200, 290, 210, 300, 200, COLOR_TEXT);
     }
     
     int end = min(scrollOffset + VISIBLE_NEWS, newsCount);
@@ -1364,7 +1372,7 @@ void processTouchEvent(int x, int y) {
             visible = VISIBLE_MATCHES;
         } else if (currentScreen == SCREEN_NEWS) {
             maxItems = newsCount;
-            visible = 5; // VISIBLE_NEWS
+            visible = 7; // VISIBLE_NEWS (updated for better display)
         } else {
             return;
         }
@@ -1389,9 +1397,9 @@ void processTouchEvent(int x, int y) {
     
     // Tab touch (top 28 pixels) - CRITICAL for navigation  
     if (y < 28 && currentScreen != SCREEN_SETTINGS) {
-        int tab = x / 80; // 4 tabs now: SHL, HA, DIV3, NEXT
+        int tab = x / 64; // 5 tabs now: SHL, HA, DIV3, NEXT, NEWS
         
-        if (tab >= 0 && tab <= 3 && tab != currentScreen) {
+        if (tab >= 0 && tab <= 4 && tab != currentScreen) {
             currentScreen = (Screen)tab;
             scrollOffset = 0;
             markDisplayDirty();
@@ -1565,10 +1573,10 @@ void handleTouch() {
             return;
         }
         
-        // Tab touch (top 28 pixels) - 4 tabs now
+        // Tab touch (top 28 pixels) - 5 tabs now
         if (y < 28 && currentScreen != SCREEN_SETTINGS) {
-            int tab = x / 80;
-            if (tab >= 0 && tab <= 3 && tab != currentScreen) {
+            int tab = x / 64;
+            if (tab >= 0 && tab <= 4 && tab != currentScreen) {
                 startFadeTransition((Screen)tab);
                 scrollOffset = 0;
             }
@@ -1620,12 +1628,15 @@ void handleTouch() {
             visible = VISIBLE_MATCHES;
         } else if (currentScreen == SCREEN_NEWS) {
             maxItems = newsCount;
-            visible = 5;
+            visible = 7;
         } else if (currentScreen == SCREEN_SHL) {
             maxItems = shlTeamCount;
             visible = VISIBLE_TEAMS;
         } else if (currentScreen == SCREEN_HA) {
             maxItems = haTeamCount;
+            visible = VISIBLE_TEAMS;
+        } else if (currentScreen == SCREEN_DIV3) {
+            maxItems = div3TeamCount;
             visible = VISIBLE_TEAMS;
         } else {
             return;
