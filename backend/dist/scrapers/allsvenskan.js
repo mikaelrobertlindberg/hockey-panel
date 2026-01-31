@@ -32,6 +32,11 @@ async function scrapeAllsvenskan() {
     try {
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+        // Set UTF-8 encoding to fix ÅÄÖ issues
+        await page.setExtraHTTPHeaders({
+            'Accept-Charset': 'utf-8',
+            'Accept-Language': 'sv-SE,sv;q=0.9,en;q=0.8'
+        });
         await page.goto('https://www.hockeyallsvenskan.se/', {
             waitUntil: 'networkidle2',
             timeout: 30000

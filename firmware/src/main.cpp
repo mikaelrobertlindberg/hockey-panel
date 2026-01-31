@@ -12,7 +12,7 @@
 #include <esp_task_wdt.h>
 #include "display_config.hpp"
 
-#define FIRMWARE_VERSION "1.18.0-fixed-tabs-arrows-teams"
+#define FIRMWARE_VERSION "1.19.1-swedish-utf8-fix"
 
 // WiFi
 const char* WIFI_SSID = "IoT";
@@ -44,6 +44,13 @@ struct TouchCalibration {
     int16_t xMin, xMax, yMin, yMax;
     bool valid;
 } touchCal = {300, 3800, 300, 3800, false};
+
+// Screen cleaning utility
+void forceCleanScreen() {
+    display.fillScreen(COLOR_BG);
+    display.fillScreen(COLOR_BG);  // Double-clear for artifacts
+    delay(50);
+}
 
 // Data structures
 struct Team {
@@ -297,7 +304,9 @@ void parseTeams(JsonArray arr, Team* teams, int& count, int maxCount) {
     count = 0;
     for (JsonObject t : arr) {
         if (count >= maxCount) break;
-        teams[count].name = t["name"].as<String>();
+        // Ensure proper UTF-8 handling for Swedish characters
+        String rawName = t["name"].as<String>();
+        teams[count].name = rawName;
         teams[count].position = t["position"].as<int>();
         if (teams[count].position == 0) teams[count].position = count + 1;
         teams[count].points = t["points"].as<int>();
@@ -348,6 +357,7 @@ void fetchDivision3Data() {
     HTTPClient http;
     http.begin(DIV3_API_URL);
     http.setTimeout(5000);
+    http.setReuse(false);   // Prevent memory leaks
     
     int httpCode = http.GET();
     
@@ -414,6 +424,9 @@ void fetchData() {
     HTTPClient http;
     http.begin(API_URL);
     http.setTimeout(8000);  // Shorter timeout
+    http.setReuse(false);   // Prevent memory leaks
+    // Ensure UTF-8 content handling for Swedish characters
+    http.addHeader("Accept-Charset", "utf-8");
     
     Serial.printf("Fetching data... (RSSI: %d dBm)\n", rssi);
     int code = http.GET();
@@ -519,7 +532,7 @@ bool isTimedOut() {
 
 void drawHeader() {
     display.fillRect(0, 0, 320, 24, COLOR_HEADER);
-    display.setFont(&fonts::Font0);
+    display.setFont(&fonts::lgfxJapanGothic_12);
     display.setTextSize(1);
     
     // 5 tabs: SHL, HA, DIV3, NEXT, NEWS  
@@ -579,7 +592,7 @@ void drawOfflineBanner() {
 
 void drawTable(Team* teams, int count, const char* title, uint16_t accent) {
     display.fillRect(0, 24, 320, 216, COLOR_BG);
-    display.setFont(&fonts::Font0);
+    display.setFont(&fonts::lgfxJapanGothic_12);
     
     display.fillRect(0, 24, 320, 14, accent);
     display.setTextColor(COLOR_TEXT);
@@ -602,12 +615,12 @@ void drawTable(Team* teams, int count, const char* title, uint16_t accent) {
     
     // Scroll arrows positioned lower for better usability
     if (scrollOffset > 0) {
-        display.fillTriangle(280, 120, 290, 110, 300, 120, COLOR_ACCENT);
-        display.drawTriangle(280, 120, 290, 110, 300, 120, COLOR_TEXT);
+        display.fillTriangle(280, 140, 290, 130, 300, 140, COLOR_ACCENT);
+        display.drawTriangle(280, 140, 290, 130, 300, 140, COLOR_TEXT);
     }
     if (scrollOffset + VISIBLE_TEAMS < count) {
-        display.fillTriangle(280, 200, 290, 210, 300, 200, COLOR_ACCENT);
-        display.drawTriangle(280, 200, 290, 210, 300, 200, COLOR_TEXT);
+        display.fillTriangle(280, 220, 290, 230, 300, 220, COLOR_ACCENT);
+        display.drawTriangle(280, 220, 290, 230, 300, 220, COLOR_TEXT);
     }
     
     int end = min(scrollOffset + VISIBLE_TEAMS, count);
@@ -641,7 +654,7 @@ void drawTable(Team* teams, int count, const char* title, uint16_t accent) {
         display.printf("%3d", teams[i].points);
     }
     
-    display.setFont(&fonts::Font0);
+    display.setFont(&fonts::lgfxJapanGothic_12);
     display.setTextColor(COLOR_DIM);
     display.setCursor(275, 140);
     display.printf("%d/%d", min(scrollOffset + 1, max(1, count - VISIBLE_TEAMS + 1)), 
@@ -650,7 +663,7 @@ void drawTable(Team* teams, int count, const char* title, uint16_t accent) {
 
 void drawMatches(const char* filter, const char* title) {
     display.fillRect(0, 24, 320, 216, COLOR_BG);
-    display.setFont(&fonts::Font0);
+    display.setFont(&fonts::lgfxJapanGothic_12);
     
     display.fillRect(0, 24, 320, 14, COLOR_ACCENT);
     display.setTextColor(COLOR_TEXT);
@@ -674,12 +687,12 @@ void drawMatches(const char* filter, const char* title) {
     
     // Scroll arrows positioned lower for better usability  
     if (scrollOffset > 0) {
-        display.fillTriangle(280, 120, 290, 110, 300, 120, COLOR_ACCENT);
-        display.drawTriangle(280, 120, 290, 110, 300, 120, COLOR_TEXT);
+        display.fillTriangle(280, 140, 290, 130, 300, 140, COLOR_ACCENT);
+        display.drawTriangle(280, 140, 290, 130, 300, 140, COLOR_TEXT);
     }
     if (scrollOffset + VISIBLE_MATCHES < filtered) {
-        display.fillTriangle(280, 200, 290, 210, 300, 200, COLOR_ACCENT);
-        display.drawTriangle(280, 200, 290, 210, 300, 200, COLOR_TEXT);
+        display.fillTriangle(280, 220, 290, 230, 300, 220, COLOR_ACCENT);
+        display.drawTriangle(280, 220, 290, 230, 300, 220, COLOR_TEXT);
     }
     
     int end = min(scrollOffset + VISIBLE_MATCHES, filtered);
@@ -691,18 +704,19 @@ void drawMatches(const char* filter, const char* title) {
         display.fillRoundRect(5, y, 280, 32, 6, COLOR_HEADER);
         
         display.fillRoundRect(8, y + 3, 22, 12, 4, m->isSHL ? COLOR_SHL : COLOR_HA);
-        display.setFont(&fonts::Font0);
+        display.setFont(&fonts::lgfxJapanGothic_12);
         display.setTextColor(COLOR_TEXT);
         display.setCursor(10, y + 5);
         display.print(m->isSHL ? "SHL" : "HA");
         
         display.setFont(&fonts::lgfxJapanGothic_12);
-        display.setCursor(35, y + 3);
+        display.setTextSize(1);
+        display.setCursor(35, y + 6);
         display.print(shortName(m->homeTeam, 12));
         display.setCursor(35, y + 20);
         display.print(shortName(m->awayTeam, 12));
         
-        display.setFont(&fonts::Font0);
+        display.setFont(&fonts::lgfxJapanGothic_12);
         display.setTextSize(2);
         if (m->status == "finished" || m->status == "live") {
             display.setTextColor(COLOR_ACCENT);
@@ -725,7 +739,7 @@ void drawMatches(const char* filter, const char* title) {
 
 void drawNews() {
     display.fillRect(0, 24, 320, 216, COLOR_BG);
-    display.setFont(&fonts::Font0);
+    display.setFont(&fonts::lgfxJapanGothic_12);
     
     display.fillRect(0, 24, 320, 14, COLOR_ACCENT);
     display.setTextColor(COLOR_TEXT);
@@ -743,12 +757,12 @@ void drawNews() {
     const int VISIBLE_NEWS = 7;
     // Scroll arrows positioned lower for better usability
     if (scrollOffset > 0) {
-        display.fillTriangle(280, 120, 290, 110, 300, 120, COLOR_ACCENT);
-        display.drawTriangle(280, 120, 290, 110, 300, 120, COLOR_TEXT);
+        display.fillTriangle(280, 140, 290, 130, 300, 140, COLOR_ACCENT);
+        display.drawTriangle(280, 140, 290, 130, 300, 140, COLOR_TEXT);
     }
     if (scrollOffset + VISIBLE_NEWS < newsCount) {
-        display.fillTriangle(280, 200, 290, 210, 300, 200, COLOR_ACCENT);
-        display.drawTriangle(280, 200, 290, 210, 300, 200, COLOR_TEXT);
+        display.fillTriangle(280, 220, 290, 230, 300, 220, COLOR_ACCENT);
+        display.drawTriangle(280, 220, 290, 230, 300, 220, COLOR_TEXT);
     }
     
     int end = min(scrollOffset + VISIBLE_NEWS, newsCount);
@@ -762,7 +776,7 @@ void drawNews() {
         // League badge
         bool isSHL = allNews[i].league == "SHL";
         display.fillRoundRect(8, y + 3, 28, 12, 6, isSHL ? COLOR_SHL : COLOR_HA);
-        display.setFont(&fonts::Font0);
+        display.setFont(&fonts::lgfxJapanGothic_12);
         display.setTextColor(COLOR_TEXT);
         display.setCursor(12, y + 5);
         display.print(isSHL ? "SHL" : "HA");
@@ -778,7 +792,7 @@ void drawNews() {
         display.print(title);
     }
     
-    display.setFont(&fonts::Font0);
+    display.setFont(&fonts::lgfxJapanGothic_12);
     display.setTextColor(COLOR_DIM);
     display.setCursor(280, 140);
     display.printf("%d/%d", min(scrollOffset + 1, max(1, newsCount - VISIBLE_NEWS + 1)), 
@@ -798,7 +812,7 @@ void drawNewsDetail() {
     
     // Back button
     display.fillRoundRect(5, 32, 50, 20, 8, COLOR_HEADER);
-    display.setFont(&fonts::Font0);
+    display.setFont(&fonts::lgfxJapanGothic_12);
     display.setTextColor(COLOR_TEXT);
     display.setCursor(12, 38);
     display.print("< BACK");
@@ -877,7 +891,7 @@ void drawTeamInfo() {
     display.fillRect(0, 28, 320, 194, COLOR_BG);
     
     display.fillRoundRect(5, 32, 50, 20, 8, COLOR_HEADER);
-    display.setFont(&fonts::Font0);
+    display.setFont(&fonts::lgfxJapanGothic_12);
     display.setTextColor(COLOR_TEXT);
     display.setCursor(12, 38);
     display.print("< BACK");
@@ -885,6 +899,7 @@ void drawTeamInfo() {
     uint16_t teamColor = getTeamColor(team->name);
     display.fillRect(0, 55, 320, 35, teamColor);
     display.setFont(&fonts::lgfxJapanGothic_12);
+    display.setTextSize(1);
     display.setTextColor(COLOR_TEXT);
     display.setCursor(10, 62);
     display.printf("#%d %s", team->position, team->name.c_str());
@@ -998,7 +1013,7 @@ void drawSettings() {
     
     // Back button
     display.fillRoundRect(5, 32, 50, 20, 8, COLOR_HEADER);
-    display.setFont(&fonts::Font0);
+    display.setFont(&fonts::lgfxJapanGothic_12);
     display.setTextColor(COLOR_TEXT);
     display.setCursor(12, 38);
     display.print("< BACK");
@@ -1058,7 +1073,7 @@ void drawSettings() {
     display.print(connectionOK ? "OK" : "Offline");
     
     // Hint
-    display.setFont(&fonts::Font0);
+    display.setFont(&fonts::lgfxJapanGothic_12);
     display.setTextColor(COLOR_DIM);
     display.setCursor(50, 215);
     display.print("Hall inne 10s for att oppna denna meny");
@@ -1072,7 +1087,7 @@ void drawCalibrationScreen() {
     display.setCursor(60, 100);
     display.print("TOUCH-KALIBRERING");
     
-    display.setFont(&fonts::Font0);
+    display.setFont(&fonts::lgfxJapanGothic_12);
     display.setCursor(40, 130);
     display.print("Tryck pa korset med pennan");
     
@@ -1157,13 +1172,18 @@ void finishCalibration() {
     }
     delay(100);  // Quick final pause
     
+    // COMPLETE ARTIFACT CLEANUP
+    forceCleanScreen();
+    
     // Reset state and go to main screen
     calibrationStep = 0;
     currentScreen = SCREEN_SHL;
     touchActive = false;
     lastTouchTime = millis();
+    scrollOffset = 0;
     
     // IMPORTANT: Reset touch state for responsive UI
+    // Note: Screen will be redrawn automatically on next loop iteration
     touchPressed = false;
     touchDebounceTime = millis();
     lastTouchCheck = 0;
