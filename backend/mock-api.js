@@ -2,10 +2,17 @@
 const express = require('express');
 const app = express();
 
-// Simple CORS headers
+// Simple CORS headers  
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Accept-Charset, Content-Type');
+    next();
+});
+
+// Request logging
+app.use((req, res, next) => {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] ${req.method} ${req.url} from ${req.ip}`);
     next();
 });
 app.use(express.json());
@@ -62,19 +69,19 @@ app.get('/api/allsvenskan', (req, res) => {
 app.get('/api/all', (req, res) => {
     res.json({
         shl: {
-            teams: mockSHLTeams,
+            standings: mockSHLTeams,  // ESP32 expects "standings" not "teams"
             matches: mockMatches.filter(m => m.isSHL),
             news: mockNews
         },
         allsvenskan: {
-            teams: mockHATeams,
+            standings: mockHATeams,   // ESP32 expects "standings" not "teams"
             matches: mockMatches.filter(m => !m.isSHL), 
             news: []
         }
     });
 });
 
-const PORT = 3080;
+const PORT = 3000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🏒 Emergency Mock Hockey API running on http://0.0.0.0:${PORT}`);
     console.log('Serving mock data for ESP32 hockey panel');

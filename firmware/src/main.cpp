@@ -13,12 +13,12 @@
 #include <PubSubClient.h>
 #include "display_config.hpp"
 
-#define FIRMWARE_VERSION "1.20.4-ota-optimized"
+#define FIRMWARE_VERSION "1.20.9-no-serial-block"
 
 // WiFi & Network
 const char* WIFI_SSID = "IoT";
 const char* WIFI_PASS = "IoTAccess123!";
-const char* API_URL = "http://192.168.1.224:3080/api/all";
+const char* API_URL = "http://192.168.1.224:3000/api/all";
 const char* DIV3_API_URL = "http://192.168.1.224:3001/division3";
 
 // MQTT Configuration
@@ -1866,7 +1866,7 @@ void setupEnhancedOTA() {
     ArduinoOTA.setPassword(OTA_PASSWORD);
     
     // Critical OTA optimizations for large transfers  
-    ArduinoOTA.setTimeout(60000);        // 60s timeout (vs 10s default)
+    ArduinoOTA.setTimeout(180000);       // 3 minutes timeout (ultra-extended)
     
     ArduinoOTA.onStart([]() {
         String type = ArduinoOTA.getCommand() == U_FLASH ? "sketch" : "filesystem";
@@ -1976,7 +1976,7 @@ void setupEnhancedOTA() {
 
 void setup() {
     Serial.begin(115200);
-    delay(300);
+    // Non-blocking serial - don't wait for connection
     
     Serial.printf("\n🏒 Hockey Panel v%s\n", FIRMWARE_VERSION);
     
@@ -2088,8 +2088,8 @@ void loop() {
         }
     }
     
-    // Check for serial calibration command
-    if (Serial.available()) {
+    // Check for serial calibration command (non-blocking)
+    if (Serial.available() > 0) {
         String cmd = Serial.readStringUntil('\n');
         cmd.trim();
         if (cmd == "calibrate" || cmd == "cal") {

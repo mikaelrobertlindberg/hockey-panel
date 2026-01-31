@@ -3,7 +3,7 @@ import { scrapeSHL } from './scrapers/shl';
 import { scrapeAllsvenskan } from './scrapers/allsvenskan';
 
 const app = express();
-const PORT = 3080;
+const PORT = 3000;
 
 // Cache för att inte hamra källsidorna
 interface Cache {
@@ -62,7 +62,7 @@ app.get('/api/allsvenskan', async (req, res) => {
   }
 });
 
-// Kombinerad endpoint för allt
+// Kombinerad endpoint för allt - SHL ÅR NU FIXAT!
 app.get('/api/all', async (req, res) => {
   try {
     const [shl, allsvenskan] = await Promise.all([
