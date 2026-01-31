@@ -1,174 +1,289 @@
 # 🏒 Hockey Panel
 
-ESP32-S3 baserad display för SHL och HockeyAllsvenskan statistik med touch-interface.
+ESP32-based hockey statistics display for SHL and HockeyAllsvenskan with touch interface and MQTT remote control.
 
-## Hårdvara
+## 🖥️ Hardware
 
-- **Display:** Waveshare ESP32-S3-Touch-LCD-4.3 (SKU: DIS06043H)
-- **Upplösning:** 800x480 IPS
-- **Touch:** GT911 kapacitiv (5-punkt)
-- **CPU:** ESP32-S3 Dual-core 240MHz
-- **RAM:** 8MB PSRAM
-- **Flash:** 16MB
-- **Anslutning:** USB-C eller OTA via WiFi
+- **Device:** ESP32-2432S028 "Cheap Yellow Display" (CYD)
+- **Display:** 2.8" IPS LCD 320×240 pixels
+- **Touch:** XPT2046 resistive touchscreen
+- **CPU:** ESP32-D0WD-V3 Dual-core 240MHz
+- **RAM:** 520KB + 4MB PSRAM
+- **Flash:** 4MB
+- **WiFi:** 802.11 b/g/n
+- **MAC Address:** 20:e7:c8:ba:78:94
 
-## Arkitektur
+## 🏗️ Architecture
 
 ```
-┌─────────────────┐     ┌──────────────┐     ┌─────────────┐
-│  SHL.se /       │ ──► │   Backend    │ ──► │   ESP32     │
-│  HockeyAllsv.   │     │  (DevPi)     │     │   Display   │
-└─────────────────┘     └──────────────┘     └─────────────┘
-       Puppeteer           Port 3080            WiFi/JSON
+┌─────────────────┐     ┌──────────────┐     ┌─────────────────┐
+│  SHL.se /       │ ──► │   Backend    │ ──► │   ESP32 CYD     │
+│  HockeyAllsv.   │     │  (DevPi)     │     │  Touch Display  │
+└─────────────────┘     └──────────────┘     └─────────────────┘
+      Web Scraping         Port 3080           WiFi JSON + MQTT
+                              │
+                              ▼
+                         ┌──────────────┐
+                         │ MQTT Broker  │ ◄─── Remote Control
+                         │ Port 1883    │
+                         └──────────────┘
 ```
 
-## Flikar på displayen
+## 📱 Display Interface
 
-| Flik | Beskrivning |
+| Mode | Description |
 |------|-------------|
-| **SHL** | Tabell med alla 14 lag, position, +/-, poäng |
-| **Allsvenskan** | Samma format för HockeyAllsvenskan |
-| **Matcher** | Kommande och spelade matcher |
-| **⚙️ Inställningar** | Display, WiFi, backend-config |
+| **SHL** | Svenska Hockey Ligan standings (14 teams) |
+| **Allsvenskan** | HockeyAllsvenskan standings (14 teams) |
+| **Division 3** | Local division standings |
+| **News** | Latest hockey news |
+| **Team Details** | Touch any team for detailed stats |
 
-## Inställningar (via touch)
+### Touch Controls
+- **Tap team row** → Show detailed statistics
+- **Swipe left/right** → Navigate between leagues
+- **Long press** → Calibration mode
 
-- 🔆 Ljusstyrka (0-100%)
-- 🎨 Kontrast (0-100%)
-- 🌙 Färgtema (Mörkt / Ljust / Hockey Blå)
-- 📶 WiFi SSID & lösenord
-- 🌐 Backend URL
-- 💾 Spara / Återställ till fabriksinställningar
+## 📡 MQTT Remote Control
 
-## Backend
+### Topics
+| Topic | Purpose | Example |
+|-------|---------|---------|
+| `hockey/panel/status` | Device telemetry | `{"firmware":"v1.20.1","uptime":12345}` |
+| `hockey/panel/command` | Remote commands | `refresh`, `reboot`, `calibrate` |
+| `hockey/panel/data` | Hockey data updates | Live match scores |
 
-Backend körs som systemd-tjänst på DevPi.
+### Commands
+```bash
+# Refresh hockey data
+mosquitto_pub -h 192.168.1.224 -t "hockey/panel/command" -m "refresh"
+
+# Reboot device  
+mosquitto_pub -h 192.168.1.224 -t "hockey/panel/command" -m "reboot"
+
+# Start touch calibration
+mosquitto_pub -h 192.168.1.224 -t "hockey/panel/command" -m "calibrate"
+```
+
+### Status Monitoring
+```bash
+# Listen to device status
+mosquitto_sub -h 192.168.1.224 -t "hockey/panel/status"
+```
+
+## ⚙️ Firmware Versions
+
+| Version | Features | Status |
+|---------|----------|---------|
+| `v1.19.1` | Swedish UTF-8 support, stable touch | ✅ Stable |
+| `v1.20.0` | MQTT + Enhanced OTA | ⚠️  HTTP timeouts |
+| `v1.20.1` | Non-blocking MQTT + HTTP fixes | ✅ **Current** |
+
+### Current Firmware: v1.20.1-mqtt-http-fix
+
+**New Features:**
+- ✅ **MQTT Integration** - Real-time remote control
+- ✅ **Enhanced OTA** - Visual progress + error handling  
+- ✅ **Non-blocking networking** - Prevents HTTP timeouts
+- ✅ **Status heartbeats** - Device telemetry every 60 seconds
+- ✅ **Swedish character support** - Perfect ÅÄÖ rendering
+
+**Memory Usage:**
+- **RAM:** 18.2% (59,600 bytes / 327,680 bytes)
+- **Flash:** 92.5% (1,212,881 bytes / 1,310,720 bytes)
+
+## 🔧 Backend Services
+
+### Production Backend (DevPi)
 
 ```bash
-# Status
-sudo systemctl status hockey-panel
+# Status check
+systemctl status hockey-panel
 
-# Loggar
-sudo journalctl -u hockey-panel -f
+# View logs
+journalctl -u hockey-panel -f
 
-# Starta om
+# Restart service
 sudo systemctl restart hockey-panel
 ```
 
-### API Endpoints
+### Emergency Mock Backend
 
-| Endpoint | Beskrivning |
-|----------|-------------|
-| `GET /api/status` | Status och poll-intervall |
-| `GET /api/shl` | SHL tabell och matcher |
-| `GET /api/allsvenskan` | Allsvenskan tabell och matcher |
-| `GET /api/all` | Allt kombinerat |
-
-### Manuell körning (dev)
+When main backend hangs (SHL scraping issues), use emergency mock:
 
 ```bash
 cd backend
-npm install
-npm run dev      # Hot-reload
-npm run build    # Bygg för produktion
-npm start        # Kör produktion
+node mock-api.js &
 ```
 
-## Firmware
+**Mock Data Includes:**
+- **SHL:** Frölunda HC, Skellefteå AIK, Luleå Hockey
+- **Allsvenskan:** BIK Karlskoga, Västerås IK
+- **Instant response** - No web scraping delays
 
-### Första installation (USB)
+## 🔌 Installation
+
+### USB Flashing (First Time)
 
 ```bash
 cd firmware
-source .venv/bin/activate
 
-# Bygg
-pio run
+# Build firmware
+python3 -m platformio run
 
-# Flasha via USB
-pio run -t upload
+# Flash via USB (ESP32 connected)
+python3 -m platformio run -t upload
 
-# Serial monitor
-pio device monitor
+# Monitor serial output
+python3 -m platformio device monitor
 ```
 
-### OTA-uppdatering (WiFi)
-
-Efter första flashen kan du uppdatera trådlöst:
+### OTA Updates (Wireless)
 
 ```bash
-# Via mDNS hostname
-pio run -e ota -t upload
+# Update via network (after initial USB flash)
+python3 -m platformio run -e esp32-cyd-ota -t upload
 
-# Eller ändra IP i platformio.ini:
-# upload_port = 192.168.1.xxx
+# OTA credentials
+# Hostname: HockeyPanel  
+# Password: hockey2026
 ```
 
-**OTA-lösenord:** `hockey2026`
+**OTA shows visual progress bar on display during update.**
 
-Under OTA-uppdatering visas en progress-bar på displayen.
+## 📊 API Endpoints
 
-## Konfiguration
+| Endpoint | Response | Status |
+|----------|----------|---------|
+| `GET /api/status` | `{"ok":true,"pollInterval":300}` | ✅ Working |
+| `GET /api/shl` | SHL teams + matches | ⚠️ Scraping hangs |
+| `GET /api/allsvenskan` | HA teams + matches | ⚠️ Scraping hangs |
+| `GET /api/all` | Combined data | ⚠️ Scraping hangs |
 
-### WiFi (första gången)
+### Network Configuration
 
-1. Flasha firmware via USB
-2. Displayen startar utan WiFi
-3. Gå till **Inställningar**-fliken
-4. Skriv in WiFi SSID och lösenord
-5. Tryck **Spara**
-6. Enheten startar om och ansluter
+**Production:**
+- **ESP32:** 192.168.1.185
+- **Backend:** 192.168.1.224:3080  
+- **MQTT:** 192.168.1.224:1883
+- **WiFi:** "IoT" network
 
-### Backend URL
+## 🛠️ Development
 
-Standard: `http://192.168.1.223:3080` (DevPi)
+### Build System
+- **Platform:** PlatformIO + ESP32 Arduino Framework
+- **Graphics:** LovyanGFX (faster than standard libraries)
+- **Font:** lgfxJapanGothic_12 (Swedish character support)
+- **Touch:** XPT2046 resistive with calibration
+- **MQTT:** PubSubClient v2.8.0
 
-Ändra i **Inställningar** om backend körs på annan maskin.
-
-## Filstruktur
-
-```
-hockey-panel/
-├── backend/
-│   ├── src/
-│   │   ├── server.ts           # Express API
-│   │   └── scrapers/
-│   │       ├── shl.ts          # SHL web scraper
-│   │       └── allsvenskan.ts  # Allsvenskan scraper
-│   ├── dist/                   # Kompilerad JS
-│   ├── package.json
-│   └── hockey-panel.service    # Systemd service
-├── firmware/
-│   ├── src/
-│   │   ├── main.cpp            # Huvudprogram + LVGL UI
-│   │   ├── display_config.h    # LovyanGFX config
-│   │   └── settings.h          # Preferences manager
-│   ├── platformio.ini
-│   └── lv_conf.h               # LVGL config
-└── README.md
+### Key Dependencies
+```ini
+lib_deps = 
+    bblanchon/ArduinoJson@^7.0.0
+    lovyan03/LovyanGFX@^1.1.16
+    knolleary/PubSubClient@^2.8
 ```
 
-## Felsökning
+### File Structure
+```
+firmware/
+├── src/
+│   ├── main.cpp              # Main application + MQTT + OTA
+│   └── display_config.hpp    # LovyanGFX hardware config  
+├── platformio.ini           # Build configuration
+└── .pio/                    # Build artifacts (ignored in git)
 
-### Display svart
-- Kolla USB-anslutning
-- Tryck RESET på kortet
-- Kolla serial monitor för fel
+backend/
+├── src/                     # TypeScript backend (original)
+├── mock-api.js             # Emergency JavaScript mock server
+├── backend.log             # Runtime logs
+└── package.json
+```
 
-### Ingen WiFi
-- Gå till Inställningar och kontrollera SSID/lösenord
-- Kolla att routern är inom räckhåll
+## 🚨 Troubleshooting
 
-### Ingen data
-- Verifiera backend körs: `curl http://devpi:3080/api/status`
-- Kolla att Backend URL är korrekt i inställningar
-- Kolla `journalctl -u hockey-panel` för backend-fel
+### Display Issues
+```bash
+# Check device connection
+ls -la /dev/ttyUSB0
 
-### OTA misslyckas
-- Verifiera att ESP32 och datorn är på samma nätverk
-- Prova med IP istället för hostname
-- Kolla att lösenordet är rätt (`hockey2026`)
+# Monitor boot process
+timeout 10s cat /dev/ttyUSB0
 
-## Licens
+# Hard reset
+# Press physical reset button on ESP32
+```
 
-MIT
+### Network Problems  
+```bash
+# Test ESP32 connectivity
+ping 192.168.1.185
+
+# Test backend API
+curl -m 5 http://192.168.1.224:3080/api/status
+
+# Test MQTT broker  
+mosquitto_pub -h 192.168.1.224 -t "test" -m "hello"
+```
+
+### Backend Hanging
+```bash
+# Kill stuck backend
+pkill -f "node.*server.js"
+
+# Start emergency mock
+cd backend && node mock-api.js &
+
+# The ESP32 will automatically use the mock API
+```
+
+### MQTT Issues
+```bash
+# Check MQTT broker status
+nmap -p 1883 192.168.1.224
+
+# Monitor device status
+mosquitto_sub -h 192.168.1.224 -t "hockey/panel/status"
+
+# Send test command
+mosquitto_pub -h 192.168.1.224 -t "hockey/panel/command" -m "refresh"
+```
+
+## 📈 Performance Metrics
+
+**Current System (v1.20.1):**
+- **Boot time:** ~15 seconds
+- **Data refresh:** 5 minutes interval  
+- **Touch response:** <100ms
+- **WiFi signal:** -57 dBm (excellent)
+- **HTTP timeout:** 15 seconds
+- **MQTT heartbeat:** 60 seconds
+- **Free heap:** 213,772 bytes
+
+## 🎯 Roadmap
+
+### Completed ✅
+- [x] Swedish character support (ÅÄÖ)
+- [x] Touch calibration system  
+- [x] MQTT remote control
+- [x] Enhanced OTA updates
+- [x] HTTP timeout resilience
+- [x] Emergency mock backend
+
+### Planned 🎯
+- [ ] Live match score updates
+- [ ] Player statistics integration
+- [ ] Multi-device MQTT fleet management
+- [ ] Web-based configuration interface
+- [ ] Automated SHL scraping improvements
+
+## 📝 License
+
+MIT License - See LICENSE file for details.
+
+---
+
+**Last Updated:** 2026-01-31 15:14 GMT+1  
+**Firmware:** v1.20.1-mqtt-http-fix  
+**Device:** ESP32-2432S028 (20:e7:c8:ba:78:94)
