@@ -1,0 +1,39 @@
+
+> hockey-panel-backend@1.0.0 start
+> node dist/server.js
+
+🏒 Hockey Panel Backend running on http://0.0.0.0:3080
+Endpoints:
+  GET /api/status      - Status och poll-intervall
+  GET /api/shl         - SHL tabell och matcher
+  GET /api/allsvenskan - Allsvenskan tabell och matcher
+  GET /api/all         - Allt kombinerat
+Scraping SHL data...
+Scraping HockeyAllsvenskan data...
+HA: 14 teams, 0 matches, 10 news
+Scrape error: TimeoutError: Navigation timeout of 30000 ms exceeded
+    at new Deferred (/home/devpi/clawd/hockey-panel/backend/node_modules/puppeteer-core/lib/cjs/puppeteer/util/Deferred.js:60:34)
+    at Deferred.create (/home/devpi/clawd/hockey-panel/backend/node_modules/puppeteer-core/lib/cjs/puppeteer/util/Deferred.js:21:16)
+    at new LifecycleWatcher (/home/devpi/clawd/hockey-panel/backend/node_modules/puppeteer-core/lib/cjs/puppeteer/cdp/LifecycleWatcher.js:73:60)
+    at CdpFrame.goto (/home/devpi/clawd/hockey-panel/backend/node_modules/puppeteer-core/lib/cjs/puppeteer/cdp/Frame.js:149:29)
+    at CdpFrame.<anonymous> (/home/devpi/clawd/hockey-panel/backend/node_modules/puppeteer-core/lib/cjs/puppeteer/util/decorators.js:109:27)
+    at CdpPage.goto (/home/devpi/clawd/hockey-panel/backend/node_modules/puppeteer-core/lib/cjs/puppeteer/api/Page.js:580:43)
+    at scrapeSHL (/home/devpi/clawd/hockey-panel/backend/dist/scrapers/shl.js:41:20)
+    at async Promise.all (index 0)
+    at async /home/devpi/clawd/hockey-panel/backend/dist/server.js:62:36
+Scraping SHL data...
+SHL scrape error: Error: Navigating frame was detached
+    at <instance_members_initializer> (/home/devpi/clawd/hockey-panel/backend/node_modules/puppeteer-core/lib/cjs/puppeteer/cdp/LifecycleWatcher.js:36:14)
+    at new LifecycleWatcher (/home/devpi/clawd/hockey-panel/backend/node_modules/puppeteer-core/lib/cjs/puppeteer/cdp/LifecycleWatcher.js:40:16)
+    at CdpFrame.goto (/home/devpi/clawd/hockey-panel/backend/node_modules/puppeteer-core/lib/cjs/puppeteer/cdp/Frame.js:149:29)
+    at CdpFrame.<anonymous> (/home/devpi/clawd/hockey-panel/backend/node_modules/puppeteer-core/lib/cjs/puppeteer/util/decorators.js:109:27)
+    at CdpPage.goto (/home/devpi/clawd/hockey-panel/backend/node_modules/puppeteer-core/lib/cjs/puppeteer/api/Page.js:580:43)
+    at scrapeSHL (/home/devpi/clawd/hockey-panel/backend/dist/scrapers/shl.js:41:20)
+    at async /home/devpi/clawd/hockey-panel/backend/dist/server.js:32:23 {
+  cause: Error: LifecycleWatcher disposed
+      at LifecycleWatcher.dispose (/home/devpi/clawd/hockey-panel/backend/node_modules/puppeteer-core/lib/cjs/puppeteer/cdp/LifecycleWatcher.js:173:29)
+      at CdpFrame.goto (/home/devpi/clawd/hockey-panel/backend/node_modules/puppeteer-core/lib/cjs/puppeteer/cdp/Frame.js:169:25)
+      at async CdpPage.goto (/home/devpi/clawd/hockey-panel/backend/node_modules/puppeteer-core/lib/cjs/puppeteer/api/Page.js:580:20)
+      at async scrapeSHL (/home/devpi/clawd/hockey-panel/backend/dist/scrapers/shl.js:41:9)
+      at async /home/devpi/clawd/hockey-panel/backend/dist/server.js:32:23
+}

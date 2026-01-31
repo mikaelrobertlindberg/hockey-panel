@@ -243,6 +243,7 @@
  .pio/libdeps/esp32-cyd/ArduinoJson/src/ArduinoJson/Configuration.hpp \
  /home/devpi/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src/Preferences.h \
  /home/devpi/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/esp_system/include/esp_task_wdt.h \
+ .pio/libdeps/esp32-cyd/PubSubClient/src/PubSubClient.h \
  src/display_config.hpp \
  .pio/libdeps/esp32-cyd/LovyanGFX/src/LovyanGFX.hpp \
  .pio/libdeps/esp32-cyd/LovyanGFX/src/lgfx/v1_init.hpp \

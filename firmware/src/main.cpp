@@ -13,7 +13,7 @@
 #include <PubSubClient.h>
 #include "display_config.hpp"
 
-#define FIRMWARE_VERSION "1.20.1-mqtt-http-fix"
+#define FIRMWARE_VERSION "1.20.4-ota-optimized"
 
 // WiFi & Network
 const char* WIFI_SSID = "IoT";
@@ -114,6 +114,9 @@ PubSubClient mqtt(espClient);
 unsigned long lastMqttHeartbeat = 0;
 const unsigned long MQTT_HEARTBEAT_INTERVAL = 60000; // 60 seconds (reduced frequency)
 
+// OTA State Management
+bool otaInProgress = false;
+
 // Selected team
 int selectedTeamIndex = -1;
 bool selectedIsSHL = true;
@@ -131,9 +134,12 @@ bool liveMatch = false;
 // Connection
 unsigned long lastSuccessfulFetch = 0;
 unsigned long lastWiFiCheck = 0;
+unsigned long lastWiFiReconnectAttempt = 0;
 const unsigned long CONNECTION_TIMEOUT = 180000;
 const unsigned long WIFI_CHECK_INTERVAL = 30000;  // Check WiFi every 30s
+const unsigned long WIFI_RECONNECT_INTERVAL = 10000;  // Reconnect attempt every 10s
 bool connectionOK = false;
+bool wifiEventHandlersRegistered = false;
 
 // === RESPONSIVE UI FIXES ===
 bool displayDirty = true;           // Flag to force display redraw
@@ -187,6 +193,11 @@ void reconnectMQTT();
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 void publishMQTTStatus();
 void setupEnhancedOTA();
+
+// WiFi Event Handlers
+void WiFiStationConnected(WiFiEvent_t event, WiFiEventInfo_t info);
+void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info);
+void WiFiStationDisconnected(WiFiEvent_t event, WiFiEventInfo_t info);
 
 void clearCalibration() {
     prefs.begin("hockey-touch", false);  // Use unique namespace
@@ -269,11 +280,27 @@ void connectWiFi() {
     }
     
     Serial.print("WiFi connecting");
+    
+    // Register WiFi event handlers (only once)
+    if (!wifiEventHandlersRegistered) {
+        WiFi.onEvent(WiFiStationConnected, ARDUINO_EVENT_WIFI_STA_CONNECTED);
+        WiFi.onEvent(WiFiGotIP, ARDUINO_EVENT_WIFI_STA_GOT_IP);
+        WiFi.onEvent(WiFiStationDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+        wifiEventHandlersRegistered = true;
+        Serial.println(" (WiFi events registered)");
+    }
+    
+    // Clean slate approach - critical for OTA reliability
+    WiFi.disconnect(true);
+    delay(1000);
+    
     WiFi.mode(WIFI_STA);
     
-    // WiFi power optimizations for better range
+    // WiFi optimizations for maximum OTA reliability
     WiFi.setTxPower(WIFI_POWER_19_5dBm);  // Max power (19.5 dBm)
-    WiFi.setSleep(false);                 // Disable power save mode
+    WiFi.setSleep(false);                 // Disable power save mode (CRITICAL for OTA)
+    WiFi.setAutoReconnect(true);          // Enable auto-reconnect
+    WiFi.persistent(true);                // Store credentials in flash
     
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     
@@ -298,8 +325,43 @@ void connectWiFi() {
         Serial.printf("  IP: %s\n", WiFi.localIP().toString().c_str());
         Serial.printf("  RSSI: %d dBm (%s)\n", rssi, signalQuality.c_str());
         Serial.printf("  TX Power: 19.5 dBm (Max)\n");
+        Serial.printf("  Auto-reconnect: ENABLED\n");
+        Serial.printf("  Sleep mode: DISABLED (OTA-ready)\n");
     } else {
         Serial.println(" FAILED - Check signal strength or move closer to router");
+    }
+}
+
+// WiFi Event Handler - Connected to AP
+void WiFiStationConnected(WiFiEvent_t event, WiFiEventInfo_t info) {
+    Serial.println("WiFi: Connected to AP successfully!");
+    connectionOK = false;  // Will be set to true when IP is obtained
+}
+
+// WiFi Event Handler - Got IP Address 
+void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
+    Serial.println("WiFi: Got IP address!");
+    Serial.printf("  IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("  RSSI: %d dBm\n", WiFi.RSSI());
+    connectionOK = true;
+    lastWiFiCheck = millis();
+}
+
+// WiFi Event Handler - Disconnected
+void WiFiStationDisconnected(WiFiEvent_t event, WiFiEventInfo_t info) {
+    connectionOK = false;
+    Serial.println("WiFi: Disconnected from AP!");
+    Serial.printf("  Reason: %d\n", info.wifi_sta_disconnected.reason);
+    
+    // Only attempt immediate reconnect if enough time has passed
+    if (millis() - lastWiFiReconnectAttempt > WIFI_RECONNECT_INTERVAL) {
+        Serial.println("WiFi: Attempting immediate reconnect...");
+        lastWiFiReconnectAttempt = millis();
+        
+        // Clean disconnect before reconnect
+        WiFi.disconnect();
+        delay(100);
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
     }
 }
 
@@ -310,9 +372,18 @@ void checkWiFiConnection() {
     lastWiFiCheck = millis();
     
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("WiFi lost, reconnecting...");
-        connectWiFi();
+        // Only attempt reconnect if enough time has passed since last attempt
+        if (millis() - lastWiFiReconnectAttempt > WIFI_RECONNECT_INTERVAL) {
+            Serial.println("WiFi: Status check - attempting reconnect...");
+            lastWiFiReconnectAttempt = millis();
+            
+            WiFi.disconnect();
+            delay(100);
+            WiFi.begin(WIFI_SSID, WIFI_PASS);
+        }
     } else {
+        connectionOK = true;
+        
         // Log signal strength every 2 minutes for diagnostics
         static unsigned long lastRSSILog = 0;
         if (millis() - lastRSSILog > 120000) {  // 2 minutes
@@ -1794,57 +1865,80 @@ void setupEnhancedOTA() {
     ArduinoOTA.setHostname(OTA_HOSTNAME);
     ArduinoOTA.setPassword(OTA_PASSWORD);
     
+    // Critical OTA optimizations for large transfers  
+    ArduinoOTA.setTimeout(60000);        // 60s timeout (vs 10s default)
+    
     ArduinoOTA.onStart([]() {
         String type = ArduinoOTA.getCommand() == U_FLASH ? "sketch" : "filesystem";
         Serial.printf("OTA: Start updating %s\n", type.c_str());
+        Serial.println("OTA: DISABLING ALL BACKGROUND TASKS");
         
-        // Publish OTA start to MQTT
+        // Set global OTA flag to disable background processing
+        otaInProgress = true;
+        
+        // CRITICAL: Stop all background activities that could interfere
+        esp_task_wdt_reset();  // Reset watchdog
+        
+        // Disconnect MQTT to free network resources
         if (mqtt.connected()) {
             mqtt.publish(MQTT_TOPIC_STATUS, "{\"ota\":\"starting\"}");
+            delay(100);
+            mqtt.disconnect();
         }
         
+        // Disable display updates to free CPU/memory
         display.fillScreen(COLOR_BG);
         display.setFont(&fonts::lgfxJapanGothic_12);
         display.setTextSize(2);
         display.setTextColor(COLOR_ACCENT);
-        display.setCursor(50, 100);
-        display.printf("OTA Update\n%s", type.c_str());
+        display.setCursor(30, 100);
+        display.printf("OTA UPDATE\nDO NOT POWER OFF");
+        display.setCursor(50, 160);
+        display.setTextSize(1);
+        display.print("Transferring firmware...");
+        
+        Serial.println("OTA: All background tasks stopped");
     });
     
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        static unsigned long lastUpdate = 0;
+        static int lastPct = -1;
         int pct = progress * 100 / total;
         
-        // Visual progress bar
-        display.fillRect(50, 140, 220, 20, COLOR_BG);
-        display.fillRect(50, 140, pct * 2.2, 20, COLOR_ACCENT);
-        display.drawRect(50, 140, 220, 20, COLOR_TEXT);
+        // Only update display every 5% to reduce CPU load
+        if (pct != lastPct && pct % 5 == 0) {
+            // Minimal display updates to save CPU/memory for OTA
+            display.fillRect(50, 190, 140, 20, COLOR_BG);
+            display.setCursor(50, 190);
+            display.setTextSize(2);
+            display.printf("%d%%", pct);
+            lastPct = pct;
+        }
         
-        // Percentage text
-        display.fillRect(90, 170, 80, 20, COLOR_BG);
-        display.setCursor(90, 170);
-        display.printf("%d%%", pct);
-        
-        // Feed watchdog during OTA
-        esp_task_wdt_reset();
-        
-        Serial.printf("OTA Progress: %u%%\r", pct);
+        // Feed watchdog every 2 seconds
+        if (millis() - lastUpdate > 2000) {
+            esp_task_wdt_reset();
+            Serial.printf("OTA: %u%% (%u/%u bytes)\n", pct, progress, total);
+            lastUpdate = millis();
+        }
     });
     
     ArduinoOTA.onEnd([]() {
         Serial.println("\nOTA: Update completed, rebooting...");
+        otaInProgress = false;  // Re-enable background tasks
         
-        if (mqtt.connected()) {
-            mqtt.publish(MQTT_TOPIC_STATUS, "{\"ota\":\"completed\"}");
-            delay(100); // Give time to send
-        }
-        
-        display.setCursor(80, 200);
+        display.setCursor(50, 220);
         display.setTextColor(COLOR_GREEN);
-        display.print("Rebooting...");
-        delay(1000);
+        display.setTextSize(1);
+        display.print("SUCCESS! Rebooting...");
+        
+        Serial.println("OTA: Success! Reboot in 3 seconds...");
+        delay(3000);
     });
     
     ArduinoOTA.onError([](ota_error_t error) {
+        otaInProgress = false;  // Re-enable background tasks on error
+        
         Serial.printf("OTA Error[%u]: ", error);
         String errorMsg = "";
         
@@ -1855,6 +1949,13 @@ void setupEnhancedOTA() {
         else if (error == OTA_END_ERROR) errorMsg = "End Failed";
         
         Serial.println(errorMsg);
+        Serial.println("OTA: Re-enabling background tasks after error");
+        
+        // Try to reconnect MQTT for error reporting
+        if (!mqtt.connected()) {
+            reconnectMQTT();
+            delay(1000);
+        }
         
         if (mqtt.connected()) {
             String mqttError = "{\"ota\":\"error\",\"message\":\"" + errorMsg + "\"}";
@@ -1863,8 +1964,9 @@ void setupEnhancedOTA() {
         
         display.fillScreen(COLOR_BG);
         display.setTextColor(COLOR_RED);
-        display.setCursor(50, 150);
-        display.printf("OTA Error:\n%s", errorMsg.c_str());
+        display.setCursor(30, 150);
+        display.setTextSize(1);
+        display.printf("OTA Error: %s\nBackground tasks restored", errorMsg.c_str());
         delay(3000);
     });
     
@@ -1967,13 +2069,19 @@ void loop() {
     
     ArduinoOTA.handle();
     
+    // CRITICAL: Skip ALL background processing during OTA to free resources
+    if (otaInProgress) {
+        delay(10);  // Minimal delay, let OTA have full CPU/network access
+        return;     // Skip everything else during OTA
+    }
+    
     // MQTT handling (non-blocking)
     reconnectMQTT(); // Will return immediately if connected or recently attempted
     
     if (mqtt.connected()) {
         mqtt.loop(); // Process incoming MQTT messages
         
-        // Publish heartbeat every 30 seconds
+        // Publish heartbeat every 60 seconds
         if (millis() - lastMqttHeartbeat > MQTT_HEARTBEAT_INTERVAL) {
             publishMQTTStatus();
             lastMqttHeartbeat = millis();
