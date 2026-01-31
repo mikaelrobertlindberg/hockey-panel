@@ -112,7 +112,7 @@ int newsCount = 0;
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
 unsigned long lastMqttHeartbeat = 0;
-const unsigned long MQTT_HEARTBEAT_INTERVAL = 60000; // 60 seconds (reduced frequency)
+const unsigned long MQTT_HEARTBEAT_INTERVAL = 20000; // 20 seconds (Mike's request for faster updates)
 
 // OTA State Management
 bool otaInProgress = false;
