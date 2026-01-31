@@ -10,15 +10,28 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <esp_task_wdt.h>
+#include <PubSubClient.h>
 #include "display_config.hpp"
 
-#define FIRMWARE_VERSION "1.19.1-swedish-utf8-fix"
+#define FIRMWARE_VERSION "1.20.1-mqtt-http-fix"
 
-// WiFi
+// WiFi & Network
 const char* WIFI_SSID = "IoT";
 const char* WIFI_PASS = "IoTAccess123!";
 const char* API_URL = "http://192.168.1.224:3080/api/all";
 const char* DIV3_API_URL = "http://192.168.1.224:3001/division3";
+
+// MQTT Configuration
+const char* MQTT_BROKER = "192.168.1.224";
+const int MQTT_PORT = 1883;
+const char* MQTT_CLIENT_ID = "hockey-panel-esp32";
+const char* MQTT_TOPIC_STATUS = "hockey/panel/status";
+const char* MQTT_TOPIC_COMMAND = "hockey/panel/command";
+const char* MQTT_TOPIC_DATA = "hockey/panel/data";
+
+// OTA Configuration  
+const char* OTA_HOSTNAME = "HockeyPanel";
+const char* OTA_PASSWORD = "hockey2026";
 
 // Colors
 #define COLOR_BG       0x1082
@@ -95,6 +108,12 @@ int matchCount = 0;
 NewsItem allNews[20];
 int newsCount = 0;
 
+// MQTT Client
+WiFiClient espClient;
+PubSubClient mqtt(espClient);
+unsigned long lastMqttHeartbeat = 0;
+const unsigned long MQTT_HEARTBEAT_INTERVAL = 60000; // 60 seconds (reduced frequency)
+
 // Selected team
 int selectedTeamIndex = -1;
 bool selectedIsSHL = true;
@@ -163,6 +182,11 @@ String modalMessage = "";
 // Forward declarations
 void markDisplayDirty();
 void checkWiFiConnection();
+void setupMQTT();
+void reconnectMQTT();
+void mqttCallback(char* topic, byte* payload, unsigned int length);
+void publishMQTTStatus();
+void setupEnhancedOTA();
 
 void clearCalibration() {
     prefs.begin("hockey-touch", false);  // Use unique namespace
@@ -356,8 +380,9 @@ void parseNews(JsonArray arr, const char* league) {
 void fetchDivision3Data() {
     HTTPClient http;
     http.begin(DIV3_API_URL);
-    http.setTimeout(5000);
+    http.setTimeout(15000); // Much longer timeout for stability
     http.setReuse(false);   // Prevent memory leaks
+    http.setConnectTimeout(5000); // Quick connect timeout
     
     int httpCode = http.GET();
     
@@ -423,8 +448,9 @@ void fetchData() {
     
     HTTPClient http;
     http.begin(API_URL);
-    http.setTimeout(8000);  // Shorter timeout
+    http.setTimeout(15000); // Much longer timeout for stability  
     http.setReuse(false);   // Prevent memory leaks
+    http.setConnectTimeout(5000); // Quick connect timeout
     // Ensure UTF-8 content handling for Swedish characters
     http.addHeader("Accept-Charset", "utf-8");
     
@@ -1676,6 +1702,176 @@ void handleTouch() {
     }
 }
 
+// MQTT Callback Function
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+    String message = "";
+    for (int i = 0; i < length; i++) {
+        message += (char)payload[i];
+    }
+    
+    Serial.printf("MQTT received [%s]: %s\n", topic, message.c_str());
+    
+    if (String(topic) == MQTT_TOPIC_COMMAND) {
+        if (message == "reboot") {
+            Serial.println("MQTT: Reboot command received");
+            ESP.restart();
+        } else if (message == "refresh") {
+            Serial.println("MQTT: Refresh data command received");
+            fetchData();
+        } else if (message == "calibrate") {
+            Serial.println("MQTT: Calibrate command received");
+            clearCalibration();
+            calibrationStep = 0;
+        }
+    }
+}
+
+// Setup MQTT Connection
+void setupMQTT() {
+    mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+    mqtt.setCallback(mqttCallback);
+    reconnectMQTT();
+    
+    Serial.println("MQTT setup complete");
+}
+
+// Reconnect MQTT if disconnected (NON-BLOCKING)
+void reconnectMQTT() {
+    static unsigned long lastConnectAttempt = 0;
+    
+    if (mqtt.connected() || WiFi.status() != WL_CONNECTED) {
+        return; // Already connected or WiFi down
+    }
+    
+    // Only attempt reconnect every 10 seconds
+    if (millis() - lastConnectAttempt < 10000) {
+        return;
+    }
+    
+    Serial.print("Attempting MQTT connection...");
+    lastConnectAttempt = millis();
+    
+    if (mqtt.connect(MQTT_CLIENT_ID)) {
+        Serial.println(" connected!");
+        
+        // Subscribe to command topic
+        mqtt.subscribe(MQTT_TOPIC_COMMAND);
+        Serial.printf("Subscribed to %s\n", MQTT_TOPIC_COMMAND);
+        
+        // Publish startup status
+        publishMQTTStatus();
+        
+    } else {
+        Serial.printf(" failed, rc=%d\n", mqtt.state());
+        // Don't delay here - let loop continue
+    }
+}
+
+// Publish status to MQTT
+void publishMQTTStatus() {
+    if (mqtt.connected()) {
+        JsonDocument status;
+        status["device"] = "hockey-panel";
+        status["firmware"] = FIRMWARE_VERSION;
+        status["ip"] = WiFi.localIP().toString();
+        status["rssi"] = WiFi.RSSI();
+        status["uptime"] = millis();
+        status["free_heap"] = ESP.getFreeHeap();
+        status["shl_teams"] = shlTeamCount;
+        status["ha_teams"] = haTeamCount;
+        status["matches"] = matchCount;
+        
+        String statusStr;
+        serializeJson(status, statusStr);
+        
+        mqtt.publish(MQTT_TOPIC_STATUS, statusStr.c_str());
+        Serial.println("MQTT status published");
+    }
+}
+
+// Enhanced OTA Setup with better error handling
+void setupEnhancedOTA() {
+    ArduinoOTA.setHostname(OTA_HOSTNAME);
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+    
+    ArduinoOTA.onStart([]() {
+        String type = ArduinoOTA.getCommand() == U_FLASH ? "sketch" : "filesystem";
+        Serial.printf("OTA: Start updating %s\n", type.c_str());
+        
+        // Publish OTA start to MQTT
+        if (mqtt.connected()) {
+            mqtt.publish(MQTT_TOPIC_STATUS, "{\"ota\":\"starting\"}");
+        }
+        
+        display.fillScreen(COLOR_BG);
+        display.setFont(&fonts::lgfxJapanGothic_12);
+        display.setTextSize(2);
+        display.setTextColor(COLOR_ACCENT);
+        display.setCursor(50, 100);
+        display.printf("OTA Update\n%s", type.c_str());
+    });
+    
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        int pct = progress * 100 / total;
+        
+        // Visual progress bar
+        display.fillRect(50, 140, 220, 20, COLOR_BG);
+        display.fillRect(50, 140, pct * 2.2, 20, COLOR_ACCENT);
+        display.drawRect(50, 140, 220, 20, COLOR_TEXT);
+        
+        // Percentage text
+        display.fillRect(90, 170, 80, 20, COLOR_BG);
+        display.setCursor(90, 170);
+        display.printf("%d%%", pct);
+        
+        // Feed watchdog during OTA
+        esp_task_wdt_reset();
+        
+        Serial.printf("OTA Progress: %u%%\r", pct);
+    });
+    
+    ArduinoOTA.onEnd([]() {
+        Serial.println("\nOTA: Update completed, rebooting...");
+        
+        if (mqtt.connected()) {
+            mqtt.publish(MQTT_TOPIC_STATUS, "{\"ota\":\"completed\"}");
+            delay(100); // Give time to send
+        }
+        
+        display.setCursor(80, 200);
+        display.setTextColor(COLOR_GREEN);
+        display.print("Rebooting...");
+        delay(1000);
+    });
+    
+    ArduinoOTA.onError([](ota_error_t error) {
+        Serial.printf("OTA Error[%u]: ", error);
+        String errorMsg = "";
+        
+        if (error == OTA_AUTH_ERROR) errorMsg = "Auth Failed";
+        else if (error == OTA_BEGIN_ERROR) errorMsg = "Begin Failed"; 
+        else if (error == OTA_CONNECT_ERROR) errorMsg = "Connect Failed";
+        else if (error == OTA_RECEIVE_ERROR) errorMsg = "Receive Failed";
+        else if (error == OTA_END_ERROR) errorMsg = "End Failed";
+        
+        Serial.println(errorMsg);
+        
+        if (mqtt.connected()) {
+            String mqttError = "{\"ota\":\"error\",\"message\":\"" + errorMsg + "\"}";
+            mqtt.publish(MQTT_TOPIC_STATUS, mqttError.c_str());
+        }
+        
+        display.fillScreen(COLOR_BG);
+        display.setTextColor(COLOR_RED);
+        display.setCursor(50, 150);
+        display.printf("OTA Error:\n%s", errorMsg.c_str());
+        delay(3000);
+    });
+    
+    ArduinoOTA.begin();
+    Serial.println("Enhanced OTA setup complete");
+}
+
 void setup() {
     Serial.begin(115200);
     delay(300);
@@ -1723,7 +1919,11 @@ void setup() {
     
     connectWiFi();
     
-    ArduinoOTA.setHostname("HockeyPanel");
+    // Setup MQTT
+    setupMQTT();
+    
+    // Enhanced OTA Setup
+    setupEnhancedOTA();
     ArduinoOTA.onStart([]() {
         display.fillScreen(COLOR_BG);
         display.setTextSize(2);
@@ -1766,6 +1966,19 @@ void loop() {
     esp_task_wdt_reset();  // Feed watchdog every loop
     
     ArduinoOTA.handle();
+    
+    // MQTT handling (non-blocking)
+    reconnectMQTT(); // Will return immediately if connected or recently attempted
+    
+    if (mqtt.connected()) {
+        mqtt.loop(); // Process incoming MQTT messages
+        
+        // Publish heartbeat every 30 seconds
+        if (millis() - lastMqttHeartbeat > MQTT_HEARTBEAT_INTERVAL) {
+            publishMQTTStatus();
+            lastMqttHeartbeat = millis();
+        }
+    }
     
     // Check for serial calibration command
     if (Serial.available()) {
