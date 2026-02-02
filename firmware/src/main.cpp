@@ -19,7 +19,7 @@
 const char* WIFI_SSID = "IoT";
 const char* WIFI_PASS = "IoTAccess123!";
 const char* API_URL = "http://192.168.1.224:3000/api/all";
-const char* DIV3_API_URL = "http://192.168.1.224:3001/division3";
+// Division 3 removed per Mike's request - NO DIV3 MOCKDATA
 
 // MQTT Configuration
 const char* MQTT_BROKER = "192.168.1.224";
@@ -45,7 +45,7 @@ const char* OTA_PASSWORD = "hockey2026";
 #define COLOR_DIM      0x7BEF
 
 // Screens
-enum Screen { SCREEN_SHL, SCREEN_HA, SCREEN_DIV3, SCREEN_NEXT, SCREEN_NEWS, SCREEN_NEWS_DETAIL, SCREEN_TEAM_INFO, SCREEN_SETTINGS, SCREEN_CALIBRATE };
+enum Screen { SCREEN_SHL, SCREEN_HA, SCREEN_NEXT, SCREEN_NEWS, SCREEN_NEWS_DETAIL, SCREEN_TEAM_INFO, SCREEN_SETTINGS, SCREEN_CALIBRATE };
 Screen currentScreen = SCREEN_SHL;
 Screen previousScreen = SCREEN_SHL;
 
@@ -100,8 +100,8 @@ Team shlTeams[14];
 int shlTeamCount = 0;
 Team haTeams[14];
 int haTeamCount = 0;
-Team div3Teams[16];  // Division 3 has more teams
-int div3TeamCount = 0;
+// Division 3 teams removed - NO DIV3 MOCKDATA
+// div3TeamCount removed - NO DIV3 MOCKDATA
 Match allMatches[40];
 int matchCount = 0;
 
@@ -448,59 +448,7 @@ void parseNews(JsonArray arr, const char* league) {
     }
 }
 
-void fetchDivision3Data() {
-    HTTPClient http;
-    http.begin(DIV3_API_URL);
-    http.setTimeout(15000); // Much longer timeout for stability
-    http.setReuse(false);   // Prevent memory leaks
-    http.setConnectTimeout(5000); // Quick connect timeout
-    
-    int httpCode = http.GET();
-    
-    if (httpCode == HTTP_CODE_OK) {
-        String payload = http.getString();
-        
-        JsonDocument doc;
-        DeserializationError error = deserializeJson(doc, payload);
-        
-        if (!error) {
-            if (doc["division3"].is<JsonObject>()) {
-                JsonObject div3 = doc["division3"];
-                if (div3["standings"].is<JsonArray>()) {
-                    parseTeams(div3["standings"].as<JsonArray>(), div3Teams, div3TeamCount, 16);
-                    Serial.printf("Division 3: Loaded %d teams from API\n", div3TeamCount);
-                }
-            }
-        } else {
-            Serial.printf("Division 3 JSON parse error: %s\n", error.c_str());
-        }
-    } else {
-        Serial.printf("Division 3 API failed (%d), using fallback data\n", httpCode);
-        // Fallback to realistic Division 3 data with real team names
-        const char* realDiv3Teams[] = {
-            "Kallinge/Ronneby", "Mörrums GoIS", "Växjö Lakers HC", "Tingsryds AIF",
-            "Olofströms IK", "Aseda IF", "IFK Berga", "Kalmar HC",
-            "Lessebo HC", "Alvesta SK", "Emmaboda IS", "Lindsdals IF",
-            "Torsas GoIF", "Nybro Vikings IF", "Karlskrona HK", "Kristianstad IK"
-        };
-        
-        div3TeamCount = 16;
-        for (int i = 0; i < div3TeamCount; i++) {
-            div3Teams[i].position = i + 1;
-            div3Teams[i].name = realDiv3Teams[i];
-            div3Teams[i].played = 22 + (i % 3);  // Slight variation
-            div3Teams[i].wins = max(0, 18 - i);
-            div3Teams[i].draws = i % 4;  // Some variety in draws
-            div3Teams[i].losses = div3Teams[i].played - div3Teams[i].wins - div3Teams[i].draws;
-            div3Teams[i].goalsFor = 55 - i * 2;
-            div3Teams[i].goalsAgainst = 30 + i * 2;
-            div3Teams[i].goalDiff = div3Teams[i].goalsFor - div3Teams[i].goalsAgainst;
-            div3Teams[i].points = div3Teams[i].wins * 3 + div3Teams[i].draws; // Standard points
-        }
-    }
-    
-    http.end();
-}
+// fetchDivision3Data() removed - NO DIV3 MOCKDATA per Mike's request
 
 void fetchData() {
     esp_task_wdt_reset();  // Feed watchdog
@@ -563,7 +511,7 @@ void fetchData() {
                 }
             }
             
-            // Division 3 will be fetched separately from dedicated scraper
+            // Division 3 removed - NO DIV3 MOCKDATA
             
             connectionOK = true;
             lastSuccessfulFetch = millis();
@@ -582,8 +530,7 @@ void fetchData() {
     }
     http.end();
     
-    // Fetch Division 3 data from dedicated scraper
-    fetchDivision3Data();
+    // Division 3 data fetch removed - NO DIV3 MOCKDATA
 }
 
 String shortName(const String& name, int maxLen) {
@@ -632,12 +579,12 @@ void drawHeader() {
     display.setFont(&fonts::lgfxJapanGothic_12);
     display.setTextSize(1);
     
-    // 5 tabs: SHL, HA, DIV3, NEXT, NEWS  
-    const char* tabs[] = {"SHL", "HA", "DIV3", "NEXT", "NEWS"};
-    uint16_t colors[] = {COLOR_SHL, COLOR_HA, 0x8410, COLOR_ACCENT, 0xF81F}; // Orange for DIV3, Magenta for NEWS
-    int tabWidth = 64;  // 320 pixels / 5 tabs = 64 pixels per tab
+    // 4 tabs: SHL, HA, NEXT, NEWS (DIV3 removed)
+    const char* tabs[] = {"SHL", "HA", "NEXT", "NEWS"};
+    uint16_t colors[] = {COLOR_SHL, COLOR_HA, COLOR_ACCENT, 0xF81F}; // Magenta for NEWS
+    int tabWidth = 80;  // 320 pixels / 4 tabs = 80 pixels per tab
     
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 4; i++) {
         int x = i * tabWidth;
         bool active = (i == currentScreen) || 
                       (currentScreen == SCREEN_TEAM_INFO && i == previousScreen) ||
@@ -982,8 +929,7 @@ void drawNewsDetail() {
 
 void drawTeamInfo() {
     Team* team = (previousScreen == SCREEN_SHL) ? &shlTeams[selectedTeamIndex] : 
-                 (previousScreen == SCREEN_HA) ? &haTeams[selectedTeamIndex] : 
-                 &div3Teams[selectedTeamIndex];
+                 &haTeams[selectedTeamIndex]; // DIV3 removed
     
     display.fillRect(0, 28, 320, 194, COLOR_BG);
     
@@ -1001,9 +947,7 @@ void drawTeamInfo() {
     display.setCursor(10, 62);
     display.printf("#%d %s", team->position, team->name.c_str());
     display.setCursor(10, 78);
-    const char* leagueName = (previousScreen == SCREEN_SHL) ? "SHL" :
-                             (previousScreen == SCREEN_HA) ? "HockeyAllsvenskan" :
-                             "Division 3";
+    const char* leagueName = (previousScreen == SCREEN_SHL) ? "SHL" : "HockeyAllsvenskan";
     display.print(leagueName);
     
     display.fillRect(0, 95, 320, 145, COLOR_BG);
@@ -1388,9 +1332,7 @@ void drawScreen() {
         case SCREEN_HA:
             drawTable(haTeams, haTeamCount, "HockeyAllsvenskan", COLOR_HA);
             break;
-        case SCREEN_DIV3:
-            drawTable(div3Teams, div3TeamCount, "Division 3", 0x8410);
-            break;
+        // SCREEN_DIV3 removed - NO DIV3 MOCKDATA
         case SCREEN_NEXT:
             drawMatches("upcoming", "Kommande matcher");
             break;
@@ -1481,9 +1423,7 @@ void processTouchEvent(int x, int y) {
         } else if (currentScreen == SCREEN_HA) {
             maxItems = haTeamCount;
             visible = VISIBLE_TEAMS;
-        } else if (currentScreen == SCREEN_DIV3) {
-            maxItems = div3TeamCount;
-            visible = VISIBLE_TEAMS;
+        // SCREEN_DIV3 case removed - NO DIV3 MOCKDATA
         } else if (currentScreen == SCREEN_NEXT) {
             maxItems = matchCount;
             visible = VISIBLE_MATCHES;
@@ -1514,9 +1454,9 @@ void processTouchEvent(int x, int y) {
     
     // Tab touch (top 28 pixels) - CRITICAL for navigation  
     if (y < 28 && currentScreen != SCREEN_SETTINGS) {
-        int tab = x / 64; // 5 tabs now: SHL, HA, DIV3, NEXT, NEWS
+        int tab = x / 80; // 4 tabs now: SHL, HA, NEXT, NEWS (DIV3 removed)
         
-        if (tab >= 0 && tab <= 4 && tab != currentScreen) {
+        if (tab >= 0 && tab <= 3 && tab != currentScreen) {
             currentScreen = (Screen)tab;
             scrollOffset = 0;
             markDisplayDirty();
@@ -1545,12 +1485,11 @@ void processTouchEvent(int x, int y) {
     }
     
     // Team click in table views
-    if ((currentScreen == SCREEN_SHL || currentScreen == SCREEN_HA || currentScreen == SCREEN_DIV3) && 
+    if ((currentScreen == SCREEN_SHL || currentScreen == SCREEN_HA) && 
         x < 270 && y > 60 && y < 238) {
         int row = (y - 63) / 19;
         int teamIdx = scrollOffset + row;
-        int maxTeams = (currentScreen == SCREEN_SHL) ? shlTeamCount : 
-                       (currentScreen == SCREEN_HA) ? haTeamCount : div3TeamCount;
+        int maxTeams = (currentScreen == SCREEN_SHL) ? shlTeamCount : haTeamCount;
         
         if (teamIdx >= 0 && teamIdx < maxTeams) {
             selectedTeamIndex = teamIdx;
@@ -1690,10 +1629,10 @@ void handleTouch() {
             return;
         }
         
-        // Tab touch (top 28 pixels) - 5 tabs now
+        // Tab touch (top 28 pixels) - 4 tabs now
         if (y < 28 && currentScreen != SCREEN_SETTINGS) {
-            int tab = x / 64;
-            if (tab >= 0 && tab <= 4 && tab != currentScreen) {
+            int tab = x / 80;
+            if (tab >= 0 && tab <= 3 && tab != currentScreen) {
                 startFadeTransition((Screen)tab);
                 scrollOffset = 0;
             }
@@ -1721,12 +1660,11 @@ void handleTouch() {
         }
         
         // Team click in table views
-        if ((currentScreen == SCREEN_SHL || currentScreen == SCREEN_HA || currentScreen == SCREEN_DIV3) && 
+        if ((currentScreen == SCREEN_SHL || currentScreen == SCREEN_HA) && 
             x < 270 && y > 60 && y < 238) {
             int row = (y - 63) / 19;
             int teamIdx = scrollOffset + row;
-            int maxTeams = (currentScreen == SCREEN_SHL) ? shlTeamCount : 
-                           (currentScreen == SCREEN_HA) ? haTeamCount : div3TeamCount;
+            int maxTeams = (currentScreen == SCREEN_SHL) ? shlTeamCount : haTeamCount;
             
             if (teamIdx >= 0 && teamIdx < maxTeams) {
                 selectedTeamIndex = teamIdx;
@@ -1752,9 +1690,7 @@ void handleTouch() {
         } else if (currentScreen == SCREEN_HA) {
             maxItems = haTeamCount;
             visible = VISIBLE_TEAMS;
-        } else if (currentScreen == SCREEN_DIV3) {
-            maxItems = div3TeamCount;
-            visible = VISIBLE_TEAMS;
+        // SCREEN_DIV3 case removed - NO DIV3 MOCKDATA
         } else {
             return;
         }
